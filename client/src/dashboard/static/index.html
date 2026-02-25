@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemi-fly — Autonomous Drone Inspection</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ── Splash Screen ─────────────────────────────────── -->
+<div class="splash" id="splash">
+  <div class="splash-logo">Gemi-fly</div>
+</div>
+
+<!-- ── Header ────────────────────────────────────────── -->
+<header class="header" id="header">
+  <div class="header-left">
+    <span class="header-title">Gemi-fly</span>
+    <span class="header-subtitle">Autonomous Drone Inspection System</span>
+  </div>
+  <div class="header-right">
+    <span class="drone-model">DJI Tello</span>
+    <div class="conn-status">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span id="conn-text">Disconnected</span>
+    </div>
+    <div class="demo-badge" id="demo-badge" style="display:none">
+      <span class="pulse-dot"></span>
+      DEMO
+    </div>
+  </div>
+</header>
+
+<!-- ── Phase Timeline ────────────────────────────────── -->
+<div class="timeline" id="timeline">
+  <div class="timeline-step" data-phase="recon">
+    <div class="step-circle" id="step-1">1</div>
+    <span class="step-label">Recon</span>
+    <span class="step-duration" id="dur-1"></span>
+  </div>
+  <div class="timeline-connector" id="conn-1-2"><div class="fill"></div></div>
+  <div class="timeline-step" data-phase="analysis">
+    <div class="step-circle" id="step-2">2</div>
+    <span class="step-label">Analysis</span>
+    <span class="step-duration" id="dur-2"></span>
+  </div>
+  <div class="timeline-connector" id="conn-2-3"><div class="fill"></div></div>
+  <div class="timeline-step" data-phase="acquire">
+    <div class="step-circle" id="step-3">3</div>
+    <span class="step-label">Acquire</span>
+    <span class="step-duration" id="dur-3"></span>
+  </div>
+  <div class="timeline-connector" id="conn-3-4"><div class="fill"></div></div>
+  <div class="timeline-step" data-phase="approach">
+    <div class="step-circle" id="step-4">4</div>
+    <span class="step-label">Approach</span>
+    <span class="step-duration" id="dur-4"></span>
+  </div>
+  <div class="timeline-connector" id="conn-4-5"><div class="fill"></div></div>
+  <div class="timeline-step" data-phase="inspection">
+    <div class="step-circle" id="step-5">5</div>
+    <span class="step-label">Inspection</span>
+    <span class="step-duration" id="dur-5"></span>
+  </div>
+</div>
+
+<!-- ── Main Content ───────────────────────────────────── -->
+<div class="main-content" id="main-content">
+  <!-- Left: Video Section -->
+  <div class="video-section">
+    <div class="video-container">
+      <canvas id="video-canvas" width="960" height="720"></canvas>
+      <div class="video-placeholder" id="video-placeholder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 19V5M5 12l7-7 7 7" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M4 20h16" stroke-linecap="round"/>
+        </svg>
+        <span>Waiting for video stream</span>
+      </div>
+    </div>
+
+    <div class="controls-row">
+      <button class="btn btn-start" id="btn-start">Start</button>
+      <button class="btn" id="btn-pause" disabled>Pause</button>
+      <button class="btn btn-land" id="btn-land" disabled>Land</button>
+      <button class="btn btn-skip" id="btn-skip" style="display:none">Skip Phase</button>
+      <button class="btn btn-estop" id="btn-estop">E-Stop</button>
+      <button class="btn btn-report" id="btn-report" style="display:none">Generate Report</button>
+    </div>
+
+    <div class="target-input-group" id="target-group">
+      <label id="target-label">Focus Object</label>
+      <input type="text" id="target-input" placeholder="What should the drone find?">
+    </div>
+  </div>
+
+  <!-- Right: Info Panels -->
+  <div class="info-panels">
+    <!-- Telemetry Panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Telemetry</span>
+        <span class="status-badge status-idle" id="status-badge">IDLE</span>
+      </div>
+      <div class="telemetry-grid">
+        <div class="telem-item">
+          <span class="telem-label">Battery</span>
+          <span class="telem-value" id="telem-battery">—%</span>
+          <div class="telem-bar"><div class="telem-bar-fill" id="battery-bar" style="width:0%"></div></div>
+        </div>
+        <div class="telem-item">
+          <span class="telem-label">Altitude</span>
+          <span class="telem-value" id="telem-altitude">— cm</span>
+        </div>
+        <div class="telem-item">
+          <span class="telem-label">Temperature</span>
+          <span class="telem-value" id="telem-temp">— &deg;C</span>
+        </div>
+      </div>
+      <div style="margin-top:8px">
+        <span class="telem-label">Phase</span>
+        <span class="perception-value" id="telem-phase" style="margin-left:4px">—</span>
+      </div>
+    </div>
+
+    <!-- Perception Panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Object Detection</span>
+        <span class="badge badge-violet">Gemini Flash</span>
+      </div>
+      <div class="perception-row">
+        <span class="perception-label">Focus Object</span>
+        <span class="perception-value" id="perc-target">—</span>
+      </div>
+      <div class="perception-row">
+        <span class="perception-label">Visible</span>
+        <span class="visible-dot" id="perc-visible-dot"></span>
+      </div>
+      <div class="perception-row">
+        <span class="perception-label">Confidence</span>
+        <div class="confidence-bar"><div class="confidence-bar-fill" id="conf-bar" style="width:0%"></div></div>
+        <span class="perception-value" id="perc-conf">0%</span>
+      </div>
+      <div class="perception-row">
+        <span class="perception-label">Distance</span>
+        <div class="confidence-bar"><div class="distance-bar-fill" id="dist-bar" style="width:0%"></div></div>
+        <span class="perception-value" id="perc-dist">—</span>
+      </div>
+    </div>
+
+    <!-- AI Activity Panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Gemini Performance</span>
+        <span class="badge badge-blue" id="ai-call-count">0 calls</span>
+      </div>
+      <div class="model-badges">
+        <span class="model-badge badge-blue" id="model-flash">Flash</span>
+        <span class="model-badge badge-violet" id="model-pro">Pro</span>
+      </div>
+      <div class="ai-spinner" id="ai-spinner">
+        <svg class="spinner-svg" viewBox="0 0 24 24" fill="none" stroke="var(--violet)" stroke-width="2.5">
+          <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+        </svg>
+        <div>
+          <div style="font-size:0.75rem;font-weight:600" id="ai-op-name">—</div>
+          <div style="font-size:0.65rem;color:var(--text-muted)" id="ai-op-desc">—</div>
+        </div>
+        <span class="perception-value" id="ai-elapsed" style="margin-left:auto">0.0s</span>
+      </div>
+      <div class="ai-stats-grid">
+        <div>
+          <div class="ai-stat-label">Total</div>
+          <div class="ai-stat-value" id="ai-total">0</div>
+        </div>
+        <div>
+          <div class="ai-stat-label">Avg Latency</div>
+          <div class="ai-stat-value" id="ai-avg">—</div>
+        </div>
+        <div>
+          <div class="ai-stat-label">AI Time</div>
+          <div class="ai-stat-value" id="ai-time">0s</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mission Log Panel -->
+    <div class="panel log-panel">
+      <div class="panel-header">
+        <span class="panel-title">Mission Log</span>
+        <span class="badge badge-gray" id="log-count">0</span>
+      </div>
+      <div class="log-container" id="log-container"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
