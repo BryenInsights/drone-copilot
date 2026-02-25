@@ -1,0 +1,200 @@
+"""Gemini Live API session manager with reconnection and session resumption."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from typing import Any
+
+from google import genai
+from google.genai import types
+
+from backend.src.config import BackendConfig
+from backend.src.models.tools import build_tool_declarations
+
+logger = logging.getLogger(__name__)
+
+
+class GeminiSession:
+    """Manages a Gemini Live API session with resumption and GoAway handling.
+
+    Wraps ``client.aio.live.connect()`` and exposes helpers for sending audio,
+    video, tool responses, and text.  The ``receive()`` async iterator yields
+    raw server messages and transparently tracks session-resumption handles and
+    GoAway signals so the relay can reconnect when needed.
+    """
+
+    def __init__(self, config: BackendConfig) -> None:
+        self._config = config
+        self._client = genai.Client(api_key=config.GEMINI_API_KEY)
+        self._session: Any | None = None
+        self._session_handle: str | None = None
+        self._go_away: bool = False
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    def _build_live_config(self) -> types.LiveConnectConfig:
+        """Build the LiveConnectConfig, including resumption handle if available."""
+        resumption_cfg = types.SessionResumptionConfig(
+            handle=self._session_handle,
+        )
+
+        return types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            system_instruction=types.Content(
+                parts=[types.Part.from_text(self._config.SYSTEM_PROMPT)],
+            ),
+            tools=build_tool_declarations(),
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=self._config.VOICE_NAME,
+                    ),
+                ),
+            ),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                sliding_window=types.SlidingWindow(),
+            ),
+            session_resumption=resumption_cfg,
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
+        )
+
+    async def connect(self) -> None:
+        """Open (or re-open) the Gemini Live API session."""
+        live_config = self._build_live_config()
+        self._go_away = False
+        logger.info(
+            "Connecting to Gemini Live API (model=%s, resumption=%s)",
+            self._config.GEMINI_MODEL,
+            self._session_handle is not None,
+        )
+        self._session = await self._client.aio.live.connect(
+            model=self._config.GEMINI_MODEL,
+            config=live_config,
+        ).__aenter__()
+        logger.info("Gemini session connected")
+
+    async def close(self) -> None:
+        """Gracefully close the current session, if open."""
+        if self._session is not None:
+            try:
+                await self._session.__aexit__(None, None, None)
+            except Exception:
+                logger.debug("Ignoring error during session close", exc_info=True)
+            finally:
+                self._session = None
+            logger.info("Gemini session closed")
+
+    @property
+    def go_away(self) -> bool:
+        """Whether a GoAway message has been received, signalling reconnect."""
+        return self._go_away
+
+    @property
+    def session_handle(self) -> str | None:
+        """Most recent session-resumption handle, if any."""
+        return self._session_handle
+
+    # ------------------------------------------------------------------
+    # Sending data
+    # ------------------------------------------------------------------
+
+    async def send_audio(self, pcm_bytes: bytes) -> None:
+        """Send a PCM audio chunk to the session."""
+        if self._session is None:
+            return
+        await self._session.send_realtime_input(
+            audio=types.Blob(
+                data=pcm_bytes,
+                mime_type=f"audio/pcm;rate={self._config.AUDIO_INPUT_RATE}",
+            ),
+        )
+
+    async def send_video(self, jpeg_bytes: bytes) -> None:
+        """Send a JPEG video frame to the session."""
+        if self._session is None:
+            return
+        await self._session.send_realtime_input(
+            video=types.Blob(data=jpeg_bytes, mime_type="image/jpeg"),
+        )
+
+    async def send_tool_response(
+        self, id: str, name: str, result: dict  # noqa: A002
+    ) -> None:
+        """Send a function-call response back to Gemini."""
+        if self._session is None:
+            return
+        await self._session.send_tool_response(
+            function_responses=[
+                types.FunctionResponse(id=id, name=name, response=result),
+            ],
+        )
+
+    async def send_text(self, text: str) -> None:
+        """Inject a text message into the session via ``send_client_content``."""
+        if self._session is None:
+            return
+        await self._session.send_client_content(
+            turns=types.Content(
+                role="user",
+                parts=[types.Part.from_text(text)],
+            ),
+            turn_complete=True,
+        )
+
+    async def send_scan_frames(
+        self, frames_jpeg: list[bytes], prompt: str
+    ) -> None:
+        """Send multiple JPEG frames with a text prompt via ``send_client_content``.
+
+        Used to send scan frames for Gemini to analyze and return a
+        ``report_scan_analysis`` tool call.
+        """
+        if self._session is None:
+            return
+        parts: list[types.Part] = []
+        for i, jpeg in enumerate(frames_jpeg):
+            parts.append(types.Part.from_text(f"[Scan frame {i}]"))
+            parts.append(
+                types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")
+            )
+        parts.append(types.Part.from_text(prompt))
+        await self._session.send_client_content(
+            turns=types.Content(role="user", parts=parts),
+            turn_complete=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Receiving data
+    # ------------------------------------------------------------------
+
+    async def receive(self) -> AsyncIterator:
+        """Async iterator that yields server messages.
+
+        Transparently tracks session-resumption handles and sets the
+        ``go_away`` flag when a GoAway message arrives so the relay can
+        trigger reconnection.
+        """
+        if self._session is None:
+            return
+
+        async for message in self._session.receive():
+            # Track session resumption handles
+            if message.session_resumption_update:
+                update = message.session_resumption_update
+                if update.resumable and update.new_handle:
+                    self._session_handle = update.new_handle
+                    logger.debug(
+                        "Session resumption handle updated: %s...",
+                        self._session_handle[:20],
+                    )
+
+            # Detect GoAway — the server is asking us to reconnect
+            if message.go_away:
+                self._go_away = True
+                logger.warning("Received GoAway from Gemini — reconnection required")
+
+            yield message
