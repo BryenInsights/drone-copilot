@@ -1,0 +1,16 @@
+[project]
+name = "drone-copilot"
+version = "0.1.0"
+description = "Voice-controlled drone copilot powered by Gemini Live API"
+requires-python = ">=3.13"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "backend/tests", "client/tests"]
+pythonpath = ["."]

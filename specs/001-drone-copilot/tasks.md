@@ -29,11 +29,11 @@
 
 **Purpose**: Project initialization, directory structure, and dependency management
 
-- [ ] T001 Create project directory structure with all `__init__.py` files per plan.md: `backend/src/`, `backend/src/models/`, `backend/tests/`, `client/src/`, `client/src/drone/`, `client/src/video/`, `client/src/audio/`, `client/src/mission/`, `client/src/dashboard/`, `client/src/dashboard/static/`, `client/src/models/`, `client/tests/`, `client/demos/exploration_demo/frames/`, `client/demos/inspection_demo/frames/`, `deploy/scripts/`, `deploy/terraform/`, `docs/`, `tests/`
-- [ ] T002 [P] Create backend/requirements.txt with dependencies: fastapi, uvicorn[standard], websockets, google-genai, pydantic, pydantic-settings
-- [ ] T003 [P] Create client/requirements.txt with dependencies: djitellopy, opencv-python-headless, sounddevice, numpy, websockets, fastapi, uvicorn[standard], pydantic, pydantic-settings
-- [ ] T004 [P] Create .env.example with all configuration variables: GEMINI_API_KEY, GEMINI_MODEL (default gemini-2.0-flash-live-001), VOICE_NAME (default Puck), BACKEND_URL (default ws://localhost:8080/ws), USE_MOCK_DRONE (default true), DASHBOARD_PORT (default 8081)
-- [ ] T005 [P] Create pyproject.toml with ruff configuration (line-length=100, target Python 3.13, select=["E","F","I","W"]) and project metadata
+- [x] T001 Create project directory structure with all `__init__.py` files per plan.md: `backend/src/`, `backend/src/models/`, `backend/tests/`, `client/src/`, `client/src/drone/`, `client/src/video/`, `client/src/audio/`, `client/src/mission/`, `client/src/dashboard/`, `client/src/dashboard/static/`, `client/src/models/`, `client/tests/`, `client/demos/exploration_demo/frames/`, `client/demos/inspection_demo/frames/`, `deploy/scripts/`, `deploy/terraform/`, `docs/`, `tests/`
+- [x] T002 [P] Create backend/requirements.txt with dependencies: fastapi, uvicorn[standard], websockets, google-genai, pydantic, pydantic-settings
+- [x] T003 [P] Create client/requirements.txt with dependencies: djitellopy, opencv-python-headless, sounddevice, numpy, websockets, fastapi, uvicorn[standard], pydantic, pydantic-settings
+- [x] T004 [P] Create .env.example with all configuration variables: GEMINI_API_KEY, GEMINI_MODEL (default gemini-2.0-flash-live-001), VOICE_NAME (default Puck), BACKEND_URL (default ws://localhost:8080/ws), USE_MOCK_DRONE (default true), DASHBOARD_PORT (default 8081)
+- [x] T005 [P] Create pyproject.toml with ruff configuration (line-length=100, target Python 3.13, select=["E","F","I","W"]) and project metadata
 
 ---
 
