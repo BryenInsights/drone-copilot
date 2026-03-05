@@ -1,0 +1,59 @@
+# Cloud Build configuration for drone-copilot backend.
+# Builds Docker image and deploys to Cloud Run.
+#
+# Trigger: push to main branch
+# Required substitutions: _GEMINI_API_KEY (set as a secret in Cloud Build)
+
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/drone-copilot-backend:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/drone-copilot-backend:latest'
+      - '.'
+    dir: 'backend'
+
+  # Push the image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - 'gcr.io/$PROJECT_ID/drone-copilot-backend'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'drone-copilot-backend'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/drone-copilot-backend:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--timeout=3600'
+      - '--concurrency=50'
+      - '--session-affinity'
+      - '--min-instances=1'
+      - '--max-instances=3'
+      - '--cpu=1'
+      - '--memory=512Mi'
+      - '--port=8080'
+      - '--set-env-vars=GEMINI_API_KEY=$$GEMINI_API_KEY'
+      - '--allow-unauthenticated'
+    secretEnv: ['GEMINI_API_KEY']
+
+images:
+  - 'gcr.io/$PROJECT_ID/drone-copilot-backend:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/drone-copilot-backend:latest'
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/gemini-api-key/versions/latest
+      env: 'GEMINI_API_KEY'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

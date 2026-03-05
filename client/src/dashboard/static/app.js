@@ -6,7 +6,7 @@
  */
 
 // ─── Phase Map ─────────────────────────────────────────────────
-const PHASES = ['recon', 'analysis', 'acquire', 'approach', 'inspection'];
+const PHASES = ['search', 'approach', 'inspect'];
 const PHASE_INDEX = Object.fromEntries(PHASES.map((p, i) => [p, i]));
 
 const RESULT_ICONS = {
@@ -283,7 +283,7 @@ class PhaseTimeline {
     }
 
     // Fill connector to next phase
-    if (n < 5) {
+    if (n < 3) {
       const conn = document.getElementById('conn-' + n + '-' + (n + 1));
       if (conn) conn.classList.add('filled');
     }
@@ -293,7 +293,7 @@ class PhaseTimeline {
     this._activePhase = null;
     this._completedPhases.clear();
     this._phaseStartTimes = {};
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= 3; i++) {
       const circle = document.getElementById('step-' + i);
       const label = circle?.parentElement?.querySelector('.step-label');
       const dur = document.getElementById('dur-' + i);
@@ -301,7 +301,7 @@ class PhaseTimeline {
       if (label) { label.className = 'step-label'; }
       if (dur) { dur.textContent = ''; }
     }
-    for (let i = 1; i < 5; i++) {
+    for (let i = 1; i < 3; i++) {
       const conn = document.getElementById('conn-' + i + '-' + (i + 1));
       if (conn) conn.classList.remove('filled');
     }
@@ -418,9 +418,49 @@ class MissionLog {
     this._countBadge = document.getElementById('log-count');
     this._count = 0;
     this._maxEntries = 100;
+
+    // Voice transcript accumulation state
+    this._lastVoiceEl = null;       // DOM element of current accumulating entry
+    this._lastVoiceSpeaker = null;  // "USER" or "COPILOT"
+    this._lastVoiceTimer = null;    // debounce timer ID
   }
 
-  addEntry(level, message, timestamp) {
+  appendVoice(speaker, text, timestamp) {
+    if (this._lastVoiceEl && this._lastVoiceSpeaker === speaker) {
+      // Append to existing entry
+      const msgSpan = this._lastVoiceEl.querySelector('.log-message');
+      if (msgSpan) {
+        msgSpan.textContent += ' ' + text;
+      }
+      this._scrollToBottom();
+    } else {
+      // New speaker or no active entry — create fresh
+      this._clearVoiceAccumulation();
+      this.addEntry('VOICE', `[${speaker}] ${text}`, timestamp, true);
+      this._lastVoiceEl = this._container.lastElementChild;
+      this._lastVoiceSpeaker = speaker;
+    }
+
+    // Reset debounce timer — after 2s of silence, finalize this entry
+    // (needs to survive gaps around tool calls where Gemini pauses >500ms)
+    if (this._lastVoiceTimer) clearTimeout(this._lastVoiceTimer);
+    this._lastVoiceTimer = setTimeout(() => this._clearVoiceAccumulation(), 2000);
+  }
+
+  _clearVoiceAccumulation() {
+    if (this._lastVoiceTimer) {
+      clearTimeout(this._lastVoiceTimer);
+      this._lastVoiceTimer = null;
+    }
+    this._lastVoiceEl = null;
+    this._lastVoiceSpeaker = null;
+  }
+
+  addEntry(level, message, timestamp, _isVoice) {
+    // Non-voice entries (TOOL_CALL, INFO, ERROR) do NOT reset accumulation.
+    // The copilot often fires tool calls mid-sentence — fragments after the
+    // tool call should still append to the existing voice entry above.
+
     const el = document.createElement('div');
     el.className = 'log-entry ' + level;
     el.innerHTML =
@@ -482,6 +522,262 @@ class MissionLog {
   }
 }
 
+// ─── Voice Client (Browser Mic → Backend) ─────────────────────
+class VoiceClient {
+  constructor(log) {
+    this._log = log;
+    this._ws = null;
+    this._audioCtx = null;
+    this._stream = null;
+    this._workletNode = null;
+    this._playbackCtx = null;
+    this._playbackTime = 0;
+    this._active = false;
+    this._onStateChange = null;
+
+    this._MOCK_RESPONSES = {
+      takeoff: {status: 'ok', message: 'Mock takeoff complete'},
+      land: {status: 'ok', message: 'Mock landed'},
+      move_drone: {status: 'ok', message: 'Mock move complete'},
+      rotate_drone: {status: 'ok', message: 'Mock rotation complete'},
+      hover: {status: 'ok', message: 'Mock hovering'},
+      set_speed: {status: 'ok', message: 'Speed set'},
+    };
+  }
+
+  get active() { return this._active; }
+
+  set onStateChange(fn) { this._onStateChange = fn; }
+
+  async toggle() {
+    if (this._active) {
+      this.stop();
+    } else {
+      await this.start();
+    }
+  }
+
+  async start() {
+    this._emitState('connecting');
+    try {
+      // Fetch backend URL
+      const res = await fetch('/api/backend-url');
+      const {url} = await res.json();
+
+      // Audio context for capture (48kHz native → downsample to 16kHz)
+      this._audioCtx = new AudioContext({sampleRate: 48000});
+
+      // Get microphone
+      this._stream = await navigator.mediaDevices.getUserMedia({
+        audio: {echoCancellation: true, noiseSuppression: true, sampleRate: 48000},
+      });
+
+      // Playback context at 24kHz
+      this._playbackCtx = new AudioContext({sampleRate: 24000});
+      this._playbackTime = 0;
+
+      // Setup AudioWorklet for capture
+      await this._setupAudioCapture();
+
+      // Open WebSocket to backend
+      this._openWebSocket(url);
+    } catch (err) {
+      this._log.addEntry('ERROR', 'Voice: ' + err.message);
+      this.stop();
+    }
+  }
+
+  stop() {
+    this._active = false;
+    if (this._ws) {
+      try { this._ws.close(); } catch {}
+      this._ws = null;
+    }
+    if (this._workletNode) {
+      this._workletNode.disconnect();
+      this._workletNode = null;
+    }
+    if (this._stream) {
+      this._stream.getTracks().forEach(t => t.stop());
+      this._stream = null;
+    }
+    if (this._audioCtx) {
+      this._audioCtx.close().catch(() => {});
+      this._audioCtx = null;
+    }
+    if (this._playbackCtx) {
+      this._playbackCtx.close().catch(() => {});
+      this._playbackCtx = null;
+    }
+    this._emitState('idle');
+  }
+
+  async _setupAudioCapture() {
+    // Inline AudioWorklet processor via Blob URL
+    const processorCode = `
+      class CaptureProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this._buffer = [];
+          this._samplesNeeded = 1600; // ~100ms at 16kHz
+        }
+        process(inputs) {
+          const input = inputs[0];
+          if (!input || !input[0]) return true;
+          const samples48k = input[0];
+          // Downsample 48kHz → 16kHz (take every 3rd sample)
+          for (let i = 0; i < samples48k.length; i += 3) {
+            this._buffer.push(samples48k[i]);
+          }
+          if (this._buffer.length >= this._samplesNeeded) {
+            const chunk = this._buffer.splice(0, this._samplesNeeded);
+            // Convert float32 → int16
+            const int16 = new Int16Array(chunk.length);
+            for (let i = 0; i < chunk.length; i++) {
+              const s = Math.max(-1, Math.min(1, chunk[i]));
+              int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            this.port.postMessage(int16.buffer, [int16.buffer]);
+          }
+          return true;
+        }
+      }
+      registerProcessor('capture-processor', CaptureProcessor);
+    `;
+    const blob = new Blob([processorCode], {type: 'application/javascript'});
+    const blobUrl = URL.createObjectURL(blob);
+
+    await this._audioCtx.audioWorklet.addModule(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+
+    const source = this._audioCtx.createMediaStreamSource(this._stream);
+    this._workletNode = new AudioWorkletNode(this._audioCtx, 'capture-processor');
+
+    this._workletNode.port.onmessage = (e) => {
+      if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+        const b64 = this._arrayBufferToBase64(e.data);
+        this._ws.send(JSON.stringify({type: 'audio_in', data: b64}));
+      }
+    };
+
+    source.connect(this._workletNode);
+    this._workletNode.connect(this._audioCtx.destination);
+  }
+
+  _openWebSocket(url) {
+    this._ws = new WebSocket(url);
+
+    this._ws.onopen = () => {
+      this._active = true;
+      this._emitState('recording');
+      this._log.addEntry('VOICE', 'Voice session started');
+    };
+
+    this._ws.onclose = () => {
+      if (this._active) {
+        this._log.addEntry('VOICE', 'Voice session ended');
+        this.stop();
+      }
+    };
+
+    this._ws.onerror = () => {
+      this._log.addEntry('ERROR', 'Voice WebSocket error');
+    };
+
+    this._ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        switch (msg.type) {
+          case 'audio_out':
+            this._enqueuePlayback(msg.data);
+            break;
+          case 'tool_call':
+            this._handleToolCalls(msg.calls || msg.data || []);
+            break;
+          case 'transcript': {
+            const speaker = (msg.speaker || 'ai').toUpperCase();
+            const text = msg.text || msg.data || '';
+            this._log.appendVoice(speaker, text, msg.timestamp);
+            break;
+          }
+          case 'interrupted':
+            this._stopPlayback();
+            break;
+          case 'session_status':
+            this._log.addEntry('INFO', 'Session: ' + (msg.status || JSON.stringify(msg.data)));
+            break;
+          case 'error':
+            this._log.addEntry('ERROR', 'Backend: ' + (msg.message || msg.data || 'unknown'));
+            break;
+        }
+      } catch {}
+    };
+  }
+
+  _handleToolCalls(calls) {
+    for (const call of calls) {
+      const name = call.name || call.function_name || 'unknown';
+      const args = call.args || call.arguments || {};
+      this._log.addEntry('TOOL_CALL', `${name}(${JSON.stringify(args)})`);
+
+      const result = this._MOCK_RESPONSES[name] || {status: 'ok', message: 'Acknowledged'};
+
+      if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+        this._ws.send(JSON.stringify({
+          type: 'tool_response',
+          id: call.id,
+          name: name,
+          response: result,
+        }));
+      }
+    }
+  }
+
+  _enqueuePlayback(b64) {
+    if (!this._playbackCtx) return;
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    const int16 = new Int16Array(bytes.buffer);
+
+    // Convert int16 → float32
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+
+    const buffer = this._playbackCtx.createBuffer(1, float32.length, 24000);
+    buffer.getChannelData(0).set(float32);
+
+    const source = this._playbackCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this._playbackCtx.destination);
+
+    const now = this._playbackCtx.currentTime;
+    const startTime = Math.max(now, this._playbackTime);
+    source.start(startTime);
+    this._playbackTime = startTime + buffer.duration;
+  }
+
+  _stopPlayback() {
+    // Reset playback schedule (barge-in)
+    this._playbackTime = 0;
+  }
+
+  _arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  _emitState(state) {
+    if (this._onStateChange) this._onStateChange(state);
+  }
+}
+
 // ─── Dashboard Controller ──────────────────────────────────────
 class Dashboard {
   constructor() {
@@ -527,6 +823,10 @@ class Dashboard {
     this._btnSkip = document.getElementById('btn-skip');
     this._btnEstop = document.getElementById('btn-estop');
     this._btnReport = document.getElementById('btn-report');
+    this._btnMic = document.getElementById('btn-mic');
+    this._micLabel = document.getElementById('mic-label');
+
+    this._micLabel.textContent = 'Mic Off';
 
     this._bindButtons();
     this._checkDemoMode();
@@ -563,6 +863,7 @@ class Dashboard {
       ai_activity:  this._onAIActivity,
       ai_result:    this._onAIResult,
       report_data:  this._onReportData,
+      mic_state:    this._onMicState,
     };
   }
 
@@ -694,6 +995,24 @@ class Dashboard {
     this._btnEstop?.addEventListener('click', () => this._sendCommand('emergency_land'));
     this._btnSkip?.addEventListener('click', () => this._sendCommand('skip_phase'));
     this._btnReport?.addEventListener('click', () => this._generateReport());
+    this._btnMic?.addEventListener('click', () => this._toggleMic());
+  }
+
+  _toggleMic() {
+    this._ws.send({ type: 'command', action: 'mic_toggle' });
+  }
+
+  _onMicState(data) {
+    this._updateMicUI(data.muted);
+  }
+
+  _updateMicUI(muted) {
+    if (!this._btnMic) return;
+    this._btnMic.classList.remove('mic-active', 'connecting', 'recording');
+    if (!muted) {
+      this._btnMic.classList.add('mic-active');
+    }
+    if (this._micLabel) this._micLabel.textContent = muted ? 'Mic Off' : 'Mic On';
   }
 
   _sendCommand(action) {
@@ -731,7 +1050,7 @@ class Dashboard {
     this._btnSkip.style.display = '';
     if (phase === 'approach') {
       this._btnSkip.textContent = 'Next Step';
-    } else if (phase === 'inspection') {
+    } else if (phase === 'inspect') {
       this._btnSkip.textContent = 'Skip Wait';
     } else {
       this._btnSkip.textContent = 'Skip Phase';

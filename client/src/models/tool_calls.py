@@ -61,12 +61,6 @@ class SetSpeedParams(BaseModel):
     speed_cm_per_sec: int = Field(ge=10, le=100)
 
 
-class StartExplorationParams(BaseModel):
-    """Parameters for start_exploration tool call."""
-
-    target_description: str = Field(min_length=1)
-
-
 class StartInspectionParams(BaseModel):
     """Parameters for start_inspection tool call."""
 
@@ -94,9 +88,3 @@ class ReportPerceptionParams(BaseModel):
         return max(0.0, min(1.0, float(v)))
 
 
-class ReportScanAnalysisParams(BaseModel):
-    """Parameters for report_scan_analysis tool call."""
-
-    best_index: int = Field(ge=0, le=7)
-    target_visible: bool
-    refined_label: str = Field(min_length=1)

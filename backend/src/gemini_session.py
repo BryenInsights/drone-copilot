@@ -28,6 +28,7 @@ class GeminiSession:
         self._config = config
         self._client = genai.Client(api_key=config.GEMINI_API_KEY)
         self._session: Any | None = None
+        self._cm: Any | None = None
         self._session_handle: str | None = None
         self._go_away: bool = False
 
@@ -44,7 +45,7 @@ class GeminiSession:
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=types.Content(
-                parts=[types.Part.from_text(self._config.SYSTEM_PROMPT)],
+                parts=[types.Part.from_text(text=self._config.SYSTEM_PROMPT)],
             ),
             tools=build_tool_declarations(),
             speech_config=types.SpeechConfig(
@@ -54,12 +55,12 @@ class GeminiSession:
                     ),
                 ),
             ),
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
             context_window_compression=types.ContextWindowCompressionConfig(
                 sliding_window=types.SlidingWindow(),
             ),
             session_resumption=resumption_cfg,
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
     async def connect(self) -> None:
@@ -71,21 +72,23 @@ class GeminiSession:
             self._config.GEMINI_MODEL,
             self._session_handle is not None,
         )
-        self._session = await self._client.aio.live.connect(
+        self._cm = self._client.aio.live.connect(
             model=self._config.GEMINI_MODEL,
             config=live_config,
-        ).__aenter__()
+        )
+        self._session = await self._cm.__aenter__()
         logger.info("Gemini session connected")
 
     async def close(self) -> None:
         """Gracefully close the current session, if open."""
-        if self._session is not None:
+        if self._cm is not None:
             try:
-                await self._session.__aexit__(None, None, None)
+                await self._cm.__aexit__(None, None, None)
             except Exception:
                 logger.debug("Ignoring error during session close", exc_info=True)
             finally:
                 self._session = None
+                self._cm = None
             logger.info("Gemini session closed")
 
     @property
@@ -122,14 +125,31 @@ class GeminiSession:
         )
 
     async def send_tool_response(
-        self, id: str, name: str, result: dict  # noqa: A002
+        self,
+        id: str,  # noqa: A002
+        name: str,
+        result: dict,
+        scheduling: str | None = None,
     ) -> None:
         """Send a function-call response back to Gemini."""
         if self._session is None:
             return
+
+        sched_enum = None
+        if scheduling is not None:
+            try:
+                sched_enum = types.FunctionResponseScheduling(scheduling)
+            except ValueError:
+                logger.warning("Unknown scheduling value: %s", scheduling)
+
         await self._session.send_tool_response(
             function_responses=[
-                types.FunctionResponse(id=id, name=name, response=result),
+                types.FunctionResponse(
+                    id=id,
+                    name=name,
+                    response=result,
+                    scheduling=sched_enum,
+                ),
             ],
         )
 
@@ -140,28 +160,28 @@ class GeminiSession:
         await self._session.send_client_content(
             turns=types.Content(
                 role="user",
-                parts=[types.Part.from_text(text)],
+                parts=[types.Part.from_text(text=text)],
             ),
             turn_complete=True,
         )
 
-    async def send_scan_frames(
+    async def send_frames_with_prompt(
         self, frames_jpeg: list[bytes], prompt: str
     ) -> None:
         """Send multiple JPEG frames with a text prompt via ``send_client_content``.
 
-        Used to send scan frames for Gemini to analyze and return a
-        ``report_scan_analysis`` tool call.
+        Used to send captured frames (e.g. inspection angles) for Gemini
+        to analyze and provide a verbal assessment.
         """
         if self._session is None:
             return
         parts: list[types.Part] = []
         for i, jpeg in enumerate(frames_jpeg):
-            parts.append(types.Part.from_text(f"[Scan frame {i}]"))
+            parts.append(types.Part.from_text(text=f"[Scan frame {i}]"))
             parts.append(
                 types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")
             )
-        parts.append(types.Part.from_text(prompt))
+        parts.append(types.Part.from_text(text=prompt))
         await self._session.send_client_content(
             turns=types.Content(role="user", parts=parts),
             turn_complete=True,

@@ -1,4 +1,4 @@
-"""PerceptionResult and ScanFrame Pydantic models."""
+"""PerceptionResult Pydantic model."""
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -21,19 +21,3 @@ class PerceptionResult(BaseModel):
     @classmethod
     def clamp_positive(cls, v: float) -> float:
         return max(0.0, min(1.0, float(v)))
-
-
-class ScanFrame(BaseModel):
-    """A captured frame from the recon scan with metadata."""
-
-    index: int = Field(ge=0, le=7)
-    heading_degrees: int = Field(ge=0, le=359)
-    jpeg_bytes: bytes
-    captured_at: float
-
-    @field_validator("jpeg_bytes")
-    @classmethod
-    def validate_jpeg_size(cls, v: bytes) -> bytes:
-        if len(v) < 1000:
-            raise ValueError("JPEG bytes too small (< 1000 bytes), likely corrupt")
-        return v

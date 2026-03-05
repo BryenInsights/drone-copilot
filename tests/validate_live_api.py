@@ -32,8 +32,11 @@ import struct
 import sys
 import time
 
+from dotenv import load_dotenv
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,7 +78,7 @@ async def validate_live_api():
         sys.exit(1)
 
     client = genai.Client(api_key=api_key)
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-live-001")
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
 
     # Define a simple tool for validation
     tool_declarations = [
@@ -185,7 +188,7 @@ async def validate_live_api():
                 turns=types.Content(
                     role="user",
                     parts=[types.Part.from_text(
-                        "Look at the current video frame and call the describe_scene tool "
+                        text="Look at the current video frame and call the describe_scene tool "
                         "to report what you see. Focus on any text visible in the image."
                     )],
                 ),
@@ -287,7 +290,7 @@ async def validate_live_api():
                         parts=[
                             types.Part.from_bytes(data=jpeg_bytes_fb, mime_type="image/jpeg"),
                             types.Part.from_text(
-                                "Call the describe_scene tool to report what you see in this image."
+                                text="Call the describe_scene tool to report what you see in this image."
                             ),
                         ],
                     ),

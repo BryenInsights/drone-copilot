@@ -88,16 +88,21 @@ class BackendClient:
         except Exception:
             logger.warning("Failed to send video frame", exc_info=True)
 
-    async def send_tool_response(self, tool_id: str, name: str, response: dict) -> None:
+    async def send_tool_response(
+        self, tool_id: str, name: str, response: dict,
+        scheduling: str | None = None,
+    ) -> None:
         """Send tool execution result to backend."""
         if not self._connected or self._ws is None:
             return
-        msg = {
+        msg: dict = {
             "type": "tool_response",
             "id": tool_id,
             "name": name,
             "response": response,
         }
+        if scheduling is not None:
+            msg["scheduling"] = scheduling
         try:
             await self._ws.send(json.dumps(msg))
         except Exception:
@@ -113,15 +118,15 @@ class BackendClient:
         except Exception:
             logger.warning("Failed to send text", exc_info=True)
 
-    async def send_scan_frames(
+    async def send_frames_with_prompt(
         self, frames_jpeg: list[bytes], prompt: str
     ) -> None:
-        """Send scan frames with a prompt for Gemini analysis."""
+        """Send frames with a prompt for Gemini analysis."""
         if not self._connected or self._ws is None:
             return
         frames_b64 = [base64.b64encode(f).decode("ascii") for f in frames_jpeg]
         msg = {
-            "type": "scan_frames",
+            "type": "frames_with_prompt",
             "frames": frames_b64,
             "prompt": prompt,
         }

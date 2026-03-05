@@ -9,6 +9,7 @@ import logging
 import time
 
 from fastapi import WebSocket, WebSocketDisconnect
+from google.genai import errors as genai_errors
 
 from backend.src.config import BackendConfig
 from backend.src.gemini_session import GeminiSession
@@ -25,6 +26,7 @@ from backend.src.models.messages import (
 logger = logging.getLogger(__name__)
 
 MAX_RECONNECT_ATTEMPTS = 3
+MAX_RECONNECT_CYCLES = 5
 RECONNECT_DELAY_S = 1.0
 
 
@@ -133,20 +135,22 @@ class Relay:
                     await self._session.send_video(jpeg_bytes)
 
                 elif msg_type == "tool_response":
+                    tool_id = msg.get("id") or ""
                     await self._session.send_tool_response(
-                        id=msg["id"],
-                        name=msg["name"],
-                        result=msg["response"],
+                        id=tool_id,
+                        name=msg.get("name", ""),
+                        result=msg.get("response", {}),
+                        scheduling=msg.get("scheduling"),
                     )
 
                 elif msg_type == "text":
                     await self._session.send_text(msg.get("text", ""))
 
-                elif msg_type == "scan_frames":
+                elif msg_type == "frames_with_prompt":
                     frames_b64: list[str] = msg.get("frames", [])
                     frames_bytes = [base64.b64decode(f) for f in frames_b64]
                     prompt = msg.get("prompt", "")
-                    await self._session.send_scan_frames(frames_bytes, prompt)
+                    await self._session.send_frames_with_prompt(frames_bytes, prompt)
 
                 else:
                     logger.warning("Unknown client message type: %s", msg_type)
@@ -173,11 +177,15 @@ class Relay:
 
     async def _receive_loop(self) -> None:
         """Iterate Gemini server messages and dispatch to the client WS."""
+        reconnect_cycles = 0
+        consecutive_empties = 0
         while self._running:
             try:
+                got_message = False
                 async for message in self._session.receive():
                     if not self._running:
                         break
+                    got_message = True
 
                     # --- Audio data ---
                     if message.data:
@@ -224,13 +232,57 @@ class Relay:
                     # --- GoAway → reconnect ---
                     if message.go_away:
                         logger.warning("GoAway received — initiating reconnection")
+                        reconnect_cycles = 0  # GoAway is expected; reset counter
                         await self._reconnect()
                         break  # restart the receive loop with the new session
 
-                # If we exit the async-for naturally (session ended) while
-                # still running, attempt reconnection.
+                # Reset cycle counter if we got real messages
+                if got_message:
+                    reconnect_cycles = 0
+                    consecutive_empties = 0
+                    continue  # Turn completed normally; re-enter receive() for next turn
+
+                # receive() returned with no messages. This can happen
+                # normally with thinking-model responses (text/thought
+                # parts that the SDK doesn't surface as data).  Only
+                # reconnect after many consecutive empties.
+                consecutive_empties += 1
+                if consecutive_empties <= MAX_RECONNECT_CYCLES:
+                    if consecutive_empties > 1:
+                        logger.debug(
+                            "Empty receive turn %d — retrying",
+                            consecutive_empties,
+                        )
+                    await asyncio.sleep(0.2)
+                    continue  # Re-enter receive(); session is likely fine
+
+                # Truly stuck — attempt reconnection.
                 if self._running and not self._session.go_away:
-                    logger.warning("Gemini stream ended unexpectedly — reconnecting")
+                    reconnect_cycles += 1
+                    consecutive_empties = 0
+                    if reconnect_cycles > MAX_RECONNECT_CYCLES:
+                        logger.error(
+                            "Gemini stream ended immediately %d times — giving up",
+                            reconnect_cycles,
+                        )
+                        await self._ws_send(
+                            ErrorMsg(
+                                code="reconnect_storm",
+                                message="Session keeps closing immediately; stopping reconnect",
+                                recoverable=False,
+                            )
+                        )
+                        self._running = False
+                        return
+                    delay = RECONNECT_DELAY_S * (2 ** (reconnect_cycles - 1))
+                    logger.warning(
+                        "Gemini stream ended unexpectedly (cycle %d/%d) "
+                        "— reconnecting in %.1fs",
+                        reconnect_cycles,
+                        MAX_RECONNECT_CYCLES,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
                     await self._reconnect()
 
             except WebSocketDisconnect:
@@ -241,6 +293,26 @@ class Relay:
                 # Raised by _reconnect when all retries are exhausted
                 self._running = False
                 raise
+            except genai_errors.APIError as e:
+                # Code 1000 = clean WebSocket close (client disconnected)
+                if e.code == 1000:
+                    logger.info("Gemini session closed cleanly (1000)")
+                    self._running = False
+                    return
+                logger.exception("Gemini API error in receive loop")
+                # Fall through to reconnect for other API errors
+                if self._running:
+                    reconnect_cycles += 1
+                    if reconnect_cycles > MAX_RECONNECT_CYCLES:
+                        self._running = False
+                        return
+                    delay = RECONNECT_DELAY_S * (2 ** (reconnect_cycles - 1))
+                    await asyncio.sleep(delay)
+                    try:
+                        await self._reconnect()
+                    except RuntimeError:
+                        self._running = False
+                        raise
             except Exception:
                 logger.exception("Error in receive loop")
                 await self._ws_send(
@@ -250,8 +322,14 @@ class Relay:
                         recoverable=True,
                     )
                 )
-                # Try to reconnect after an unexpected error
+                # Try to reconnect after an unexpected error with backoff
                 if self._running:
+                    reconnect_cycles += 1
+                    if reconnect_cycles > MAX_RECONNECT_CYCLES:
+                        self._running = False
+                        return
+                    delay = RECONNECT_DELAY_S * (2 ** (reconnect_cycles - 1))
+                    await asyncio.sleep(delay)
                     try:
                         await self._reconnect()
                     except RuntimeError:

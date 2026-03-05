@@ -1,8 +1,8 @@
 """Client configuration for the drone copilot.
 
 Loads settings from environment variables and .env file using pydantic-settings.
-All drone hardware thresholds, API parameters, approach controller gains,
-and environment settings are defined here with sensible defaults.
+All drone hardware thresholds, API parameters, and environment settings are
+defined here with sensible defaults.
 """
 
 import logging
@@ -14,7 +14,7 @@ from pydantic_settings import BaseSettings
 class ClientConfig(BaseSettings):
     """Central configuration for the drone copilot client."""
 
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
     # ── Drone Hardware Thresholds ────────────────────────────────────────
     MIN_MOVE_DISTANCE: int = 20
@@ -40,30 +40,8 @@ class ClientConfig(BaseSettings):
 
     # ── Gemini API ───────────────────────────────────────────────────────
     API_TIMEOUT_MS: int = 60000
-    MULTI_FRAME_TIMEOUT_MS: int = 120000
-    PERCEPTION_TIMEOUT_S: int = 45
     MAX_API_RETRIES: int = 2
     PERCEPTION_FRAME_WIDTH: int = 768
-
-    # ── Approach Controller ──────────────────────────────────────────────
-    KP_ROTATION: float = 25.0
-    KP_FORWARD: float = 50.0
-    KP_VERTICAL: float = 40.0
-    KP_LATERAL: float = 50.0
-    HORIZONTAL_DEADBAND: float = 0.08
-    VERTICAL_DEADBAND: float = 0.06
-    SKIP_ROTATION_THRESHOLD: float = 3.0
-    SKIP_VERTICAL_THRESHOLD: float = 5.0
-    SKIP_LATERAL_THRESHOLD: float = 15.0
-    COMPLETION_SIZE: float = 0.20
-    CENTERING_THRESHOLD: float = 0.30
-    STRAFE_ZONE_THRESHOLD: float = 0.15
-    EMA_ALPHA: float = 0.50
-    MAX_FORWARD_FAR: int = 40
-    MAX_FORWARD_MEDIUM: int = 30
-    MAX_FORWARD_CLOSE: int = 20
-    MAX_APPROACH_STEPS: int = 15
-    APPROACH_WATCHDOG_S: int = 120
 
     # ── Environment ──────────────────────────────────────────────────────
     USE_MOCK_DRONE: bool = True

@@ -22,6 +22,7 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._connections: set[Any] = set()
         self._last_status: str | None = None  # Cached for late-joiner replay
+        self._last_mic_state: str | None = None  # Cached for late-joiner replay
 
     @property
     def connection_count(self) -> int:
@@ -40,6 +41,13 @@ class ConnectionManager:
             except Exception:
                 logger.debug("Failed to replay status to new client", exc_info=True)
 
+        # Replay last mic state for late joiners
+        if self._last_mic_state is not None:
+            try:
+                await websocket.send_text(self._last_mic_state)
+            except Exception:
+                logger.debug("Failed to replay mic state to new client", exc_info=True)
+
     def disconnect(self, websocket: Any) -> None:
         """Remove a WebSocket connection."""
         self._connections.discard(websocket)
@@ -53,9 +61,11 @@ class ConnectionManager:
         """
         msg_type = message.get("type")
 
-        # Cache status messages for late-joiner replay
+        # Cache status and mic_state messages for late-joiner replay
         if msg_type == "status":
             self._last_status = json.dumps(message)
+        elif msg_type == "mic_state":
+            self._last_mic_state = json.dumps(message)
 
         text = json.dumps(message)
         dead: list[Any] = []
@@ -183,7 +193,23 @@ class DashboardBroadcaster:
             "timestamp": time.time(),
         })
 
+    async def broadcast_mic_state(self, muted: bool) -> None:
+        """Broadcast mic muted/unmuted state."""
+        await self.broadcast_json({
+            "type": "mic_state",
+            "data": {"muted": muted},
+            "timestamp": time.time(),
+        })
+
     # -- Sync wrappers for mission threads --
+
+    def send_mic_state_sync(self, muted: bool) -> None:
+        """Fire-and-forget mic state broadcast from sync context."""
+        self._broadcast_fire_and_forget({
+            "type": "mic_state",
+            "data": {"muted": muted},
+            "timestamp": time.time(),
+        })
 
     def send_status_sync(self, data: dict) -> None:
         """Fire-and-forget status broadcast from sync thread."""

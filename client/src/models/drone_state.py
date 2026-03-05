@@ -18,7 +18,9 @@ class DroneState(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def is_flying(self) -> bool:
-        return self.altitude > 10.0
+        if self.takeoff_time is not None:
+            return True
+        return self.altitude >= 10.0
 
 
 class Telemetry(BaseModel):

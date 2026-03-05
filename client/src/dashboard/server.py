@@ -17,7 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from client.src.dashboard.broadcaster import ConnectionManager, DashboardBroadcaster
+from client.src.dashboard.broadcaster import DashboardBroadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ def create_dashboard_app(
     telemetry_adapter: Any = None,
     demo_mode: bool = False,
     demo_info: list[dict] | None = None,
+    backend_ws_url: str = "ws://localhost:8080/ws",
 ) -> FastAPI:
     """Create the dashboard FastAPI application.
 
@@ -112,6 +113,11 @@ def create_dashboard_app(
             "demo_mode": _demo_mode,
             "demos": _demo_info,
         }
+
+    @app.get("/api/backend-url")
+    async def backend_url_endpoint():
+        """Return the backend WebSocket URL for browser voice chat."""
+        return {"url": backend_ws_url}
 
     # --- WebSocket Endpoint ---
 

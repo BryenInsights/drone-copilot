@@ -270,6 +270,16 @@ body {
 .btn-estop:hover { background: #b91c1c; }
 .btn-skip { background: var(--violet-bg); color: var(--violet); border-color: var(--violet); }
 .btn-report { background: var(--blue-bg); color: var(--blue); border-color: var(--blue); }
+.btn-mic { background: var(--bg-surface); color: var(--text-secondary); border-color: var(--border); margin-left: auto; }
+.btn-mic:hover { border-color: var(--text-muted); }
+.btn-mic.connecting { background: var(--amber-bg); color: var(--amber); border-color: var(--amber); }
+.btn-mic.recording { background: var(--red); color: white; border-color: var(--red); animation: mic-pulse 1.5s ease-in-out infinite; }
+.btn-mic.mic-active { background: var(--green); color: white; border-color: var(--green); }
+.btn-mic.mic-active:hover { background: #15803d; }
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+}
 
 .target-input-group {
   display: flex; gap: 8px; margin-top: 4px;
@@ -488,6 +498,8 @@ body {
 .log-entry.COMMAND { border-left-color: var(--teal); }
 .log-entry.WARNING { border-left-color: var(--amber); }
 .log-entry.ERROR { border-left-color: var(--red); }
+.log-entry.VOICE { border-left-color: var(--green); }
+.log-entry.TOOL_CALL { border-left-color: var(--teal); }
 .log-time {
   font-family: var(--font-mono);
   font-size: 0.65rem;
@@ -506,6 +518,8 @@ body {
 .log-level.COMMAND { background: var(--teal-bg); color: var(--teal); }
 .log-level.WARNING { background: var(--amber-bg); color: var(--amber); }
 .log-level.ERROR { background: var(--red-bg); color: var(--red); }
+.log-level.VOICE { background: var(--green-bg); color: var(--green); }
+.log-level.TOOL_CALL { background: var(--teal-bg); color: var(--teal); }
 .log-message {
   flex: 1;
   color: var(--text-primary);

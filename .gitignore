@@ -42,3 +42,18 @@ htmlcov/
 
 # Temporary
 *.tmp
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+.terraform.lock.hcl
+
+# Project reference docs (not for public repo)
+LESSONS_LEARNED.md
+CLAUDE.md
+DASHBOARD_DESIGN.md
+HACKATHON_RESOURCES.md
+.specify/
+specs/

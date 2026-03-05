@@ -1,8 +1,7 @@
-"""Inspection mission — multi-angle observation and detailed verbal assessment.
+"""Hybrid inspection mission — live narration at each angle + batch summary.
 
-Implements User Story 3: "Check that plant for issues" — the drone approaches
-the target, observes from multiple angles, and delivers a detailed verbal
-assessment.
+The drone captures 3 angles without landing, the AI narrates each angle live,
+then all frames are sent together for a comprehensive verbal summary.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from client.src.config import ClientConfig
-from client.src.mission.exploration import ApproachController, PerceptionBridge
+from client.src.mission.perception_bridge import PerceptionBridge
 from client.src.models.mission import Mission, MissionStatus, MissionType
 
 if TYPE_CHECKING:
@@ -28,10 +27,11 @@ INSPECTION_ANGLE_LABELS = ["front", "right 45°", "left 45°"]
 
 
 class InspectionMission:
-    """Multi-angle inspection mission: approach → capture angles → land → report.
+    """Hybrid inspection: live narration per angle + batch summary.
 
-    Runs in a background thread. Optionally reuses ApproachController from
-    exploration.py if the target needs to be approached first.
+    Runs in a background thread. Captures frames from multiple angles
+    without landing. AI narrates each angle live, then all frames are
+    sent together for a comprehensive multi-angle assessment.
     """
 
     def __init__(
@@ -183,6 +183,18 @@ class InspectionMission:
                 else:
                     logger.warning("No frame captured for %s view", label)
 
+                # Live narration: ask Gemini to describe this angle
+                if jpeg_bytes is not None:
+                    self._send_text_sync(
+                        f"You are now viewing the {target_description} from the "
+                        f"{label} angle. Describe what you see from this perspective."
+                    )
+                    # Brief pause to allow Gemini to narrate before next angle
+                    for _ in range(4):  # ~4 seconds total
+                        if self._abort_event.is_set():
+                            raise RuntimeError("Inspection aborted by user")
+                        time.sleep(1.0)
+
                 # Return to original heading if we rotated
                 if angle != 0:
                     # Rotate back
@@ -196,29 +208,27 @@ class InspectionMission:
                 self._notify_status()
                 return self._mission
 
-            # --- Land and generate report ---
+            # --- Send batch frames for comprehensive multi-angle summary ---
             logger.info(
-                "Inspection capture complete (%d frames). Landing for analysis.",
+                "Inspection capture complete (%d frames). Sending for analysis.",
                 len(captured_frames),
             )
-            self._controller.land()
 
             if self._abort_event.is_set():
                 raise RuntimeError("Inspection aborted by user")
 
-            # Send all captured frames to Gemini for detailed analysis
+            # Send all captured frames to Gemini for comprehensive summary
             self._send_inspection_frames_sync(
                 captured_frames, captured_labels, target_description, aspects,
             )
 
-            # The AI will respond verbally with its assessment — no need to
-            # parse the response. The verbal report IS the output of the
-            # inspection mission. Gemini will describe findings based on the
-            # frames and aspects provided.
-
             # Give Gemini time to generate the verbal report
             logger.info("Waiting for Gemini verbal report...")
             time.sleep(2.0)  # Brief wait for report generation to begin
+
+            # Land after all angles captured and analysis sent
+            logger.info("Analysis sent. Landing.")
+            self._controller.land()
 
             self._mission.status = MissionStatus.COMPLETE
             self._notify_status()

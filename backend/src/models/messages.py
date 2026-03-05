@@ -29,6 +29,7 @@ class ToolResponseMsg(BaseModel):
     id: str
     name: str
     response: dict
+    scheduling: str | None = None
 
 
 # ── Outgoing (Backend → Client) ──────────────────────────────────────────────

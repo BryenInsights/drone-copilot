@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 
 import sounddevice as sd
 
@@ -19,6 +20,7 @@ class AudioPlayback:
         self._chunk_size = int(sample_rate * chunk_ms / 1000)
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._stream: sd.RawOutputStream | None = None
+        self._last_audio_time: float = 0.0
 
     def _callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
         if status:
@@ -32,8 +34,16 @@ class AudioPlayback:
                 outdata[len(data):] = b'\x00' * (expected - len(data))
             else:
                 outdata[:] = data[:expected]
+            self._last_audio_time = time.monotonic()
         except asyncio.QueueEmpty:
             outdata[:] = b'\x00' * len(outdata)
+
+    @property
+    def is_playing(self) -> bool:
+        """True if audio is actively being output (or was within 150ms)."""
+        if not self._queue.empty():
+            return True
+        return (time.monotonic() - self._last_audio_time) < 0.15
 
     def start(self) -> None:
         self._stream = sd.RawOutputStream(

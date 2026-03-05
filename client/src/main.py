@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import signal
 import sys
 import threading
 import time
+from datetime import datetime
 
 import uvicorn
 
 from client.src.config import ClientConfig, setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Drone Copilot Client")
+    parser.add_argument(
+        "--record-demo",
+        action="store_true",
+        help="Record the session for demo replay",
+    )
+    return parser.parse_args()
 
 
 def _create_drone(config: ClientConfig):
@@ -38,11 +50,18 @@ def _create_drone(config: ClientConfig):
 async def _audio_send_loop(
     audio_capture,
     backend_client,
+    audio_playback,
 ) -> None:
-    """Continuously send captured audio to backend."""
+    """Continuously send captured audio to backend.
+
+    Discards mic audio while the copilot is speaking to prevent
+    echo feedback loops (the mic picking up speaker output).
+    """
     while True:
         try:
             pcm_bytes = await audio_capture.queue.get()
+            if audio_playback.is_playing:
+                continue  # Discard echo — copilot is speaking
             await backend_client.send_audio(pcm_bytes)
         except asyncio.CancelledError:
             break
@@ -68,6 +87,7 @@ async def _video_send_loop(
 
 
 async def main() -> None:
+    args = _parse_args()
     config = ClientConfig()
     setup_logging(config)
 
@@ -113,12 +133,35 @@ async def main() -> None:
     broadcaster = DashboardBroadcaster(conn_manager)
     broadcaster.set_event_loop(loop)
 
+    # Attach demo recorder if --record-demo flag is set
+    recorder = None
+    if args.record_demo:
+        from pathlib import Path
+
+        from client.src.dashboard.recorder import DemoRecorder
+
+        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        record_dir = Path(__file__).parent.parent / "demos" / f"recording_{ts_str}"
+        recorder = DemoRecorder(record_dir)
+        broadcaster.set_recorder(recorder)
+        logger.info("Demo recording enabled: %s", record_dir)
+
     # Create dashboard app with frame and telemetry adapters
     dashboard_app = create_dashboard_app(
         broadcaster=broadcaster,
         frame_adapter=frame_streamer.get_dashboard_frame,
         telemetry_adapter=lambda: controller.get_telemetry().model_dump(),
+        backend_ws_url=config.BACKEND_URL,
     )
+
+    # Register dashboard command handler for mic toggle
+    async def dashboard_command_handler(msg: dict) -> None:
+        action = msg.get("action")
+        if action == "mic_toggle":
+            new_muted = audio_capture.toggle_muted()
+            await broadcaster.broadcast_mic_state(new_muted)
+
+    dashboard_app.state.command_handler = dashboard_command_handler
 
     # Start dashboard server in background thread
     dashboard_server = uvicorn.Server(
@@ -147,7 +190,6 @@ async def main() -> None:
             if hasattr(mission.status, "value")
             else str(mission.status),
             "target": mission.target_description or "",
-            "approach_step": mission.approach_step,
         })
     )
 
@@ -179,7 +221,14 @@ async def main() -> None:
     # Register handlers on backend client
     backend_client.on_audio_out(audio_playback.enqueue)
     backend_client.on_tool_call(tool_handler.handle_tool_calls)
-    backend_client.on_interrupted(audio_playback.clear_queue)
+
+    def on_interrupted() -> None:
+        """Clear both playback and capture queues, mute mic for speaker decay."""
+        audio_playback.clear_queue()
+        audio_capture.clear_queue()
+        audio_capture.mute(0.3)  # 300ms for speaker decay
+
+    backend_client.on_interrupted(on_interrupted)
 
     def on_transcript(speaker: str, text: str, timestamp: float) -> None:
         logger.info("[%s] %s", speaker.upper(), text)
@@ -203,15 +252,25 @@ async def main() -> None:
     audio_capture.start(loop)
     audio_playback.start()
 
+    # Prime initial mic state for dashboard late joiners
+    broadcaster.send_mic_state_sync(audio_capture.is_muted)
+
     logger.info("All components started. Connecting to backend...")
 
     try:
+        # Start recording if enabled
+        if recorder is not None:
+            recorder.start(target="", mode="freeform")
+
         # Connect to backend
         await backend_client.connect()
 
         # Launch concurrent tasks
         tasks = [
-            asyncio.create_task(_audio_send_loop(audio_capture, backend_client), name="audio_send"),
+            asyncio.create_task(
+                _audio_send_loop(audio_capture, backend_client, audio_playback),
+                name="audio_send",
+            ),
             asyncio.create_task(
                 _video_send_loop(frame_streamer, backend_client), name="video_send",
             ),
@@ -239,6 +298,10 @@ async def main() -> None:
     finally:
         # Graceful shutdown
         logger.info("Shutting down...")
+
+        # Stop demo recording
+        if recorder is not None:
+            recorder.stop()
 
         dashboard_server.should_exit = True
         audio_capture.stop()

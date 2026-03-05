@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Gemi-fly — Autonomous Drone Inspection</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
 
@@ -34,34 +34,22 @@
 
 <!-- ── Phase Timeline ────────────────────────────────── -->
 <div class="timeline" id="timeline">
-  <div class="timeline-step" data-phase="recon">
+  <div class="timeline-step" data-phase="search">
     <div class="step-circle" id="step-1">1</div>
-    <span class="step-label">Recon</span>
+    <span class="step-label">Search</span>
     <span class="step-duration" id="dur-1"></span>
   </div>
   <div class="timeline-connector" id="conn-1-2"><div class="fill"></div></div>
-  <div class="timeline-step" data-phase="analysis">
+  <div class="timeline-step" data-phase="approach">
     <div class="step-circle" id="step-2">2</div>
-    <span class="step-label">Analysis</span>
+    <span class="step-label">Approach</span>
     <span class="step-duration" id="dur-2"></span>
   </div>
   <div class="timeline-connector" id="conn-2-3"><div class="fill"></div></div>
-  <div class="timeline-step" data-phase="acquire">
+  <div class="timeline-step" data-phase="inspect">
     <div class="step-circle" id="step-3">3</div>
-    <span class="step-label">Acquire</span>
+    <span class="step-label">Inspect</span>
     <span class="step-duration" id="dur-3"></span>
-  </div>
-  <div class="timeline-connector" id="conn-3-4"><div class="fill"></div></div>
-  <div class="timeline-step" data-phase="approach">
-    <div class="step-circle" id="step-4">4</div>
-    <span class="step-label">Approach</span>
-    <span class="step-duration" id="dur-4"></span>
-  </div>
-  <div class="timeline-connector" id="conn-4-5"><div class="fill"></div></div>
-  <div class="timeline-step" data-phase="inspection">
-    <div class="step-circle" id="step-5">5</div>
-    <span class="step-label">Inspection</span>
-    <span class="step-duration" id="dur-5"></span>
   </div>
 </div>
 
@@ -86,6 +74,15 @@
       <button class="btn btn-land" id="btn-land" disabled>Land</button>
       <button class="btn btn-skip" id="btn-skip" style="display:none">Skip Phase</button>
       <button class="btn btn-estop" id="btn-estop">E-Stop</button>
+      <button class="btn btn-mic" id="btn-mic" title="Voice Chat">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+        <span id="mic-label">Mic Off</span>
+      </button>
       <button class="btn btn-report" id="btn-report" style="display:none">Generate Report</button>
     </div>
 
@@ -197,6 +194,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>

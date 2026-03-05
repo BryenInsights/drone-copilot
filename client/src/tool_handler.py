@@ -10,22 +10,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from client.src.mission.exploration import (
-    ExplorationMission,
-    PerceptionBridge,
-    ScanAnalysisBridge,
-)
 from client.src.mission.inspection import InspectionMission
-from client.src.models.perception import ScanFrame
+from client.src.mission.perception_bridge import PerceptionBridge
 from client.src.models.tool_calls import (
     HoverParams,
     LandParams,
     MoveDroneParams,
     ReportPerceptionParams,
-    ReportScanAnalysisParams,
     RotateDroneParams,
     SetSpeedParams,
-    StartExplorationParams,
     StartInspectionParams,
     TakeoffParams,
 )
@@ -38,6 +31,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Map tool names to their Pydantic parameter models
+# Tools declared with Behavior.NON_BLOCKING in the backend
+_NON_BLOCKING_TOOLS = {"move_drone", "rotate_drone"}
+
+# Map tool names to their Pydantic parameter models
 _TOOL_MODELS: dict[str, type] = {
     "takeoff": TakeoffParams,
     "land": LandParams,
@@ -45,10 +42,8 @@ _TOOL_MODELS: dict[str, type] = {
     "move_drone": MoveDroneParams,
     "rotate_drone": RotateDroneParams,
     "set_speed": SetSpeedParams,
-    "start_exploration": StartExplorationParams,
     "start_inspection": StartInspectionParams,
     "report_perception": ReportPerceptionParams,
-    "report_scan_analysis": ReportScanAnalysisParams,
 }
 
 
@@ -72,10 +67,8 @@ class ToolHandler:
 
         # Mission state
         self._mission_thread: threading.Thread | None = None
-        self._exploration: ExplorationMission | None = None
         self._inspection: InspectionMission | None = None
         self._perception_bridge = PerceptionBridge()
-        self._scan_analysis_bridge = ScanAnalysisBridge()
 
         # Event loop for calling async functions from mission thread
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -177,17 +170,11 @@ class ToolHandler:
             elif name == "set_speed":
                 return self._controller.set_speed(params.speed_cm_per_sec)
 
-            elif name == "start_exploration":
-                return self._handle_start_exploration(params)
-
             elif name == "start_inspection":
                 return self._handle_start_inspection(params)
 
             elif name == "report_perception":
                 return self._handle_report_perception(params)
-
-            elif name == "report_scan_analysis":
-                return self._handle_report_scan_analysis(params)
 
             else:
                 return {
@@ -203,108 +190,6 @@ class ToolHandler:
                 "error": "execution_error",
                 "message": str(e),
             }
-
-    # ------------------------------------------------------------------
-    # Exploration mission
-    # ------------------------------------------------------------------
-
-    def _handle_start_exploration(
-        self, params: StartExplorationParams,
-    ) -> dict:
-        """Launch exploration mission in background thread."""
-        if self.is_mission_active:
-            return {
-                "success": False,
-                "error": "mission_active",
-                "message": "A mission is already running. "
-                "Say 'stop' to cancel it first.",
-            }
-
-        if self._streamer is None:
-            return {
-                "success": False,
-                "error": "no_video",
-                "message": "Frame streamer not available",
-            }
-
-        logger.info(
-            "Starting exploration mission: %s", params.target_description,
-        )
-
-        # Create async helpers for the mission thread
-        async def send_text(text: str) -> None:
-            await self._backend.send_text(text)
-
-        async def send_frames(
-            frames: list[ScanFrame], target: str,
-        ) -> None:
-            frames_jpeg = [f.jpeg_bytes for f in frames]
-            prompt = (
-                f"I just completed a 360-degree scan looking for: "
-                f"'{target}'. These are the {len(frames)} scan frames "
-                f"captured at 45-degree intervals. Analyze all frames "
-                f"and call report_scan_analysis with: best_index "
-                f"(0-{len(frames)-1}, which frame shows the target "
-                f"most clearly), target_visible (true/false), and "
-                f"refined_label (precise visual description like "
-                f"'green cardboard box with white label')."
-            )
-            await self._backend.send_scan_frames(frames_jpeg, prompt)
-
-        # Create mission
-        self._exploration = ExplorationMission(
-            controller=self._controller,
-            frame_streamer=self._streamer,
-            config=self._config,
-            perception_bridge=self._perception_bridge,
-            scan_analysis_bridge=self._scan_analysis_bridge,
-            send_text_fn=send_text,
-            send_frames_fn=send_frames,
-            on_status_change=self._notify_status_change,
-        )
-        if self._loop:
-            self._exploration.set_event_loop(self._loop)
-
-        # Launch in background thread (daemon=False per lesson C2)
-        self._mission_thread = threading.Thread(
-            target=self._run_exploration,
-            args=(params.target_description,),
-            name="exploration-mission",
-            daemon=False,
-        )
-        self._mission_thread.start()
-
-        return {
-            "success": True,
-            "result": f"exploration_started_for_{params.target_description}",
-        }
-
-    def _run_exploration(self, target_description: str) -> None:
-        """Run exploration mission in background thread."""
-        try:
-            if self._exploration:
-                mission = self._exploration.run(target_description)
-                logger.info(
-                    "Exploration mission completed: %s", mission.status,
-                )
-        except Exception:
-            logger.exception("Exploration mission thread error")
-            if self._controller.state.is_flying:
-                self._controller.emergency_land()
-
-    def _abort_mission(self, reason: str) -> None:
-        """Abort the active mission."""
-        logger.warning("Aborting mission: %s", reason)
-        if self._exploration:
-            self._exploration.abort()
-        if self._inspection:
-            self._inspection.abort()
-        if self._mission_thread and self._mission_thread.is_alive():
-            self._mission_thread.join(timeout=15.0)
-            if self._mission_thread.is_alive():
-                logger.error(
-                    "Mission thread did not stop within 15s timeout",
-                )
 
     # ------------------------------------------------------------------
     # Inspection mission
@@ -357,7 +242,7 @@ class ToolHandler:
                 " Describe the object's condition, notable features, "
                 "and any issues or observations."
             )
-            await self._backend.send_scan_frames(
+            await self._backend.send_frames_with_prompt(
                 frames, prompt,
             )
 
@@ -403,15 +288,26 @@ class ToolHandler:
             if self._controller.state.is_flying:
                 self._controller.emergency_land()
 
+    def _abort_mission(self, reason: str) -> None:
+        """Abort the active mission."""
+        logger.warning("Aborting mission: %s", reason)
+        if self._inspection:
+            self._inspection.abort()
+        if self._mission_thread and self._mission_thread.is_alive():
+            self._mission_thread.join(timeout=15.0)
+            if self._mission_thread.is_alive():
+                logger.error(
+                    "Mission thread did not stop within 15s timeout",
+                )
+
     # ------------------------------------------------------------------
-    # Perception and scan analysis
+    # Perception
     # ------------------------------------------------------------------
 
     def _handle_report_perception(
         self, params: ReportPerceptionParams,
     ) -> dict:
-        """Feed perception result to approach controller bridge."""
-        # Feed to the perception bridge for the approach controller
+        """Feed perception result to perception bridge for dashboard."""
         self._perception_bridge.feed(params)
 
         logger.debug(
@@ -424,20 +320,6 @@ class ToolHandler:
         )
         return {"success": True, "result": "perception_recorded"}
 
-    def _handle_report_scan_analysis(
-        self, params: ReportScanAnalysisParams,
-    ) -> dict:
-        """Feed scan analysis result to exploration mission."""
-        self._scan_analysis_bridge.feed(params)
-
-        logger.info(
-            "Scan analysis: best_index=%d visible=%s label='%s'",
-            params.best_index,
-            params.target_visible,
-            params.refined_label,
-        )
-        return {"success": True, "result": "scan_analysis_recorded"}
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -447,7 +329,15 @@ class ToolHandler:
     ) -> None:
         """Send tool response with drone state back to backend."""
         response["drone_state"] = self._controller.get_state_dict()
-        await self._backend.send_tool_response(tool_id, name, response)
+
+        # NON_BLOCKING tools: deliver on success when idle, interrupt on failure
+        scheduling: str | None = None
+        if name in _NON_BLOCKING_TOOLS:
+            scheduling = "WHEN_IDLE" if response.get("success") else "INTERRUPT"
+
+        await self._backend.send_tool_response(
+            tool_id, name, response, scheduling=scheduling,
+        )
         logger.info(
             "Tool response sent: %s success=%s",
             name,
