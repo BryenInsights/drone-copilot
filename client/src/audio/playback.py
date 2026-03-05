@@ -1,7 +1,7 @@
 """Audio playback with barge-in support using sounddevice."""
 
-import asyncio
 import logging
+import threading
 import time
 
 import sounddevice as sd
@@ -12,36 +12,43 @@ logger = logging.getLogger(__name__)
 class AudioPlayback:
     """Plays AI voice responses at 24kHz, mono, int16.
 
-    Supports barge-in by clearing the queue when interrupted.
+    Uses a continuous byte buffer instead of a per-chunk queue so the
+    sounddevice callback always reads exactly the bytes it needs,
+    eliminating silence gaps from variable-size Gemini audio chunks.
     """
 
     def __init__(self, sample_rate: int = 24000, chunk_ms: int = 100) -> None:
         self._sample_rate = sample_rate
         self._chunk_size = int(sample_rate * chunk_ms / 1000)
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
         self._stream: sd.RawOutputStream | None = None
         self._last_audio_time: float = 0.0
 
     def _callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
         if status:
             logger.warning("Audio playback status: %s", status)
-        try:
-            data = self._queue.get_nowait()
-            # Pad or trim to match expected frame size
-            expected = frames * 2  # int16 = 2 bytes per sample
-            if len(data) < expected:
-                outdata[:len(data)] = data
-                outdata[len(data):] = b'\x00' * (expected - len(data))
+        expected = frames * 2  # int16 = 2 bytes per sample
+        with self._lock:
+            available = len(self._buffer)
+            if available >= expected:
+                outdata[:] = bytes(self._buffer[:expected])
+                del self._buffer[:expected]
+                self._last_audio_time = time.monotonic()
+            elif available > 0:
+                outdata[:available] = bytes(self._buffer)
+                outdata[available:] = b'\x00' * (expected - available)
+                self._buffer.clear()
+                self._last_audio_time = time.monotonic()
             else:
-                outdata[:] = data[:expected]
-            self._last_audio_time = time.monotonic()
-        except asyncio.QueueEmpty:
-            outdata[:] = b'\x00' * len(outdata)
+                outdata[:] = b'\x00' * expected
 
     @property
     def is_playing(self) -> bool:
         """True if audio is actively being output (or was within 150ms)."""
-        if not self._queue.empty():
+        with self._lock:
+            has_data = len(self._buffer) > 0
+        if has_data:
             return True
         return (time.monotonic() - self._last_audio_time) < 0.15
 
@@ -64,20 +71,17 @@ class AudioPlayback:
         logger.info("Audio playback stopped")
 
     def clear_queue(self) -> None:
-        """Clear audio queue for barge-in handling (R6)."""
-        cleared = 0
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-                cleared += 1
-            except asyncio.QueueEmpty:
-                break
-        if cleared:
-            logger.info("Barge-in: cleared %d audio chunks", cleared)
+        """Clear audio buffer for barge-in handling (R6)."""
+        with self._lock:
+            size = len(self._buffer)
+            self._buffer.clear()
+        if size:
+            logger.info("Barge-in: cleared %d bytes of audio", size)
 
     def enqueue(self, pcm_bytes: bytes) -> None:
-        """Add PCM audio to playback queue."""
-        self._queue.put_nowait(pcm_bytes)
+        """Add PCM audio to playback buffer."""
+        with self._lock:
+            self._buffer.extend(pcm_bytes)
 
     def __enter__(self):
         return self

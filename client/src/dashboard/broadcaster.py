@@ -193,6 +193,16 @@ class DashboardBroadcaster:
             "timestamp": time.time(),
         })
 
+    async def broadcast_transcript(
+        self, speaker: str, text: str, timestamp: float | None = None,
+    ) -> None:
+        """Broadcast a voice transcript fragment for accumulation."""
+        await self.broadcast_json({
+            "type": "transcript",
+            "data": {"speaker": speaker, "text": text},
+            "timestamp": timestamp or time.time(),
+        })
+
     async def broadcast_mic_state(self, muted: bool) -> None:
         """Broadcast mic muted/unmuted state."""
         await self.broadcast_json({
@@ -202,6 +212,16 @@ class DashboardBroadcaster:
         })
 
     # -- Sync wrappers for mission threads --
+
+    def send_transcript_sync(
+        self, speaker: str, text: str, timestamp: float | None = None,
+    ) -> None:
+        """Fire-and-forget transcript broadcast from sync context."""
+        self._broadcast_fire_and_forget({
+            "type": "transcript",
+            "data": {"speaker": speaker, "text": text},
+            "timestamp": timestamp or time.time(),
+        })
 
     def send_mic_state_sync(self, muted: bool) -> None:
         """Fire-and-forget mic state broadcast from sync context."""

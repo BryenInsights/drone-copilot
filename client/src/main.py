@@ -69,6 +69,28 @@ async def _audio_send_loop(
             logger.warning("Audio send error", exc_info=True)
 
 
+async def _response_watchdog(backend_client, watchdog_state) -> None:
+    """Nudge Gemini if it goes silent after user speech."""
+    while True:
+        try:
+            await asyncio.sleep(2.0)
+            now = time.time()
+            if (
+                watchdog_state["last_user_ts"] > watchdog_state["last_copilot_ts"]
+                and now - watchdog_state["last_user_ts"] > 8.0
+                and not watchdog_state["nudged"]
+            ):
+                logger.warning("Watchdog: AI silent >8s after user speech, sending nudge")
+                await backend_client.send_text(
+                    "[SYSTEM] The user spoke but received no response. Please reply."
+                )
+                watchdog_state["nudged"] = True
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.warning("Watchdog error", exc_info=True)
+
+
 async def _video_send_loop(
     frame_streamer,
     backend_client,
@@ -219,7 +241,11 @@ async def main() -> None:
         pass
 
     # Register handlers on backend client
-    backend_client.on_audio_out(audio_playback.enqueue)
+    def _on_audio_out(pcm_bytes: bytes) -> None:
+        audio_playback.enqueue(pcm_bytes)
+        audio_capture.mute(0.8)
+
+    backend_client.on_audio_out(_on_audio_out)
     backend_client.on_tool_call(tool_handler.handle_tool_calls)
 
     def on_interrupted() -> None:
@@ -230,9 +256,22 @@ async def main() -> None:
 
     backend_client.on_interrupted(on_interrupted)
 
+    # Watchdog state for detecting AI silence
+    watchdog_state = {
+        "last_user_ts": 0.0,
+        "last_copilot_ts": 0.0,
+        "nudged": False,
+    }
+
     def on_transcript(speaker: str, text: str, timestamp: float) -> None:
         logger.info("[%s] %s", speaker.upper(), text)
-        broadcaster.send_log_sync("info", f"[{speaker.upper()}] {text}")
+        broadcaster.send_transcript_sync(speaker.upper(), text, timestamp)
+        # Track timestamps for response watchdog
+        if speaker.upper() == "USER":
+            watchdog_state["last_user_ts"] = time.time()
+            watchdog_state["nudged"] = False  # Reset nudge on new user speech
+        elif speaker.upper() == "COPILOT":
+            watchdog_state["last_copilot_ts"] = time.time()
 
     backend_client.on_transcript(on_transcript)
 
@@ -247,8 +286,9 @@ async def main() -> None:
     backend_client.on_error(on_error)
 
     # Start all components
-    controller.start()
+    # frame_capture BEFORE controller — streamon must finish before heartbeat fires
     frame_capture.start()
+    controller.start()
     audio_capture.start(loop)
     audio_playback.start()
 
@@ -275,6 +315,10 @@ async def main() -> None:
                 _video_send_loop(frame_streamer, backend_client), name="video_send",
             ),
             asyncio.create_task(backend_client.receive_loop(), name="backend_receive"),
+            asyncio.create_task(
+                _response_watchdog(backend_client, watchdog_state),
+                name="response_watchdog",
+            ),
         ]
 
         logger.info("=== Voice session active. Speak to your drone! ===")

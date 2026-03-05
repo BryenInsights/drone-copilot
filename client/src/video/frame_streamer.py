@@ -42,6 +42,13 @@ class FrameStreamer:
             return None
         return jpeg_bytes
 
+    def reset_rate_limit(self) -> None:
+        """Reset perception rate limit so the next frame goes through immediately.
+
+        Called after rotation/movement to ensure Gemini sees a fresh post-action frame.
+        """
+        self._last_perception_time = 0.0
+
     def get_perception_frame(self) -> str | None:
         """Get base64-encoded JPEG frame for backend (768px wide, rate-limited to 1 FPS)."""
         now = time.time()

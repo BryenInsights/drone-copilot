@@ -61,6 +61,13 @@ class GeminiSession:
                 sliding_window=types.SlidingWindow(),
             ),
             session_resumption=resumption_cfg,
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                    prefix_padding_ms=100,
+                    silence_duration_ms=500,
+                ),
+            ),
         )
 
     async def connect(self) -> None:

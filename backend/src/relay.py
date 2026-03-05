@@ -50,6 +50,11 @@ class Relay:
         self._config = config
         self._running = False
 
+        # Context tracking for post-reconnect injection
+        self._last_user_text: str | None = None
+        self._last_tool_calls: list[str] = []
+        self._active_task: str | None = None
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -97,6 +102,7 @@ class Relay:
                 await self._session.connect()
                 await self._ws_send(SessionStatusMsg(status="connected"))
                 logger.info("Reconnection succeeded on attempt %d", attempt)
+                await self._inject_reconnect_context()
                 return
             except Exception:
                 logger.exception("Reconnection attempt %d failed", attempt)
@@ -113,6 +119,24 @@ class Relay:
         )
         self._running = False
         raise RuntimeError("Gemini reconnection failed")
+
+    async def _inject_reconnect_context(self) -> None:
+        """Inject a brief context summary so Gemini can continue the task."""
+        parts = ["[SYSTEM] Session was interrupted and reconnected."]
+        if self._active_task:
+            parts.append(f"Active task before interruption: {self._active_task}")
+        if self._last_tool_calls:
+            recent = ", ".join(self._last_tool_calls[-5:])
+            parts.append(f"Recent tool calls: {recent}")
+        if self._last_user_text:
+            parts.append(f"Last user request: {self._last_user_text}")
+        parts.append("Continue from where you left off.")
+        context = " ".join(parts)
+        try:
+            await self._session.send_text(context)
+            logger.info("Injected reconnect context: %s", context[:100])
+        except Exception:
+            logger.warning("Failed to inject reconnect context", exc_info=True)
 
     # ------------------------------------------------------------------
     # Send loop: client WS -> Gemini
@@ -203,12 +227,18 @@ class Relay:
                             for fc in message.tool_call.function_calls
                         ]
                         await self._ws_send(ToolCallMsg(calls=entries))
+                        # Track tool calls for reconnect context
+                        self._last_tool_calls.extend(
+                            fc.name for fc in message.tool_call.function_calls
+                        )
+                        self._last_tool_calls = self._last_tool_calls[-5:]
 
                     # --- Transcriptions and interruption ---
                     if message.server_content:
                         sc = message.server_content
 
                         if sc.input_transcription and sc.input_transcription.text:
+                            self._last_user_text = sc.input_transcription.text
                             await self._ws_send(
                                 TranscriptMsg(
                                     speaker="user",
@@ -218,10 +248,17 @@ class Relay:
                             )
 
                         if sc.output_transcription and sc.output_transcription.text:
+                            out_text = sc.output_transcription.text
+                            # Track task-like phrases for reconnect context
+                            lower = out_text.lower()
+                            for kw in ("search for", "find", "inspect", "looking for"):
+                                if kw in lower:
+                                    self._active_task = out_text.strip()
+                                    break
                             await self._ws_send(
                                 TranscriptMsg(
                                     speaker="copilot",
-                                    text=sc.output_transcription.text,
+                                    text=out_text,
                                     timestamp=time.time(),
                                 )
                             )

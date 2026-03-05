@@ -73,12 +73,19 @@ class CommandExecutor:
 
     def _heartbeat_loop(self) -> None:
         """Send periodic queries to keep the Tello connection alive."""
+        # Wait for initialization commands (connect, streamon) to settle
+        self._heartbeat_stop.wait(timeout=5.0)
+        if self._heartbeat_stop.is_set():
+            return
+
         while self._running and not self._heartbeat_stop.is_set():
             # Non-blocking acquire — skip if a command is in progress (lesson C5)
             if self._lock.acquire(blocking=False):
                 try:
-                    self.drone.get_battery()
+                    self.drone.query_battery()
                     logger.debug("Heartbeat: battery query sent")
+                except (ValueError, TypeError):
+                    pass  # UDP response mismatch — harmless
                 except Exception:
                     logger.warning("Heartbeat: failed to query drone", exc_info=True)
                 finally:

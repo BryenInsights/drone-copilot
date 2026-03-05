@@ -158,14 +158,22 @@ class ToolHandler:
                 return self._controller.hover()
 
             elif name == "move_drone":
-                return self._controller.move(
+                result = self._controller.move(
                     params.direction, params.distance_cm,
                 )
+                if result.get("success") and self._streamer:
+                    await asyncio.sleep(1.5)  # Let fresh frame be captured
+                    self._streamer.reset_rate_limit()  # Force next frame through
+                return result
 
             elif name == "rotate_drone":
-                return self._controller.rotate(
+                result = self._controller.rotate(
                     params.direction, params.degrees,
                 )
+                if result.get("success") and self._streamer:
+                    await asyncio.sleep(1.5)  # Let fresh frame be captured
+                    self._streamer.reset_rate_limit()  # Force next frame through
+                return result
 
             elif name == "set_speed":
                 return self._controller.set_speed(params.speed_cm_per_sec)

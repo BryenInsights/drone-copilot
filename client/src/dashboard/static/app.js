@@ -860,6 +860,7 @@ class Dashboard {
       status:       this._onStatus,
       perception:   this._onPerception,
       log:          this._onLog,
+      transcript:   this._onTranscript,
       ai_activity:  this._onAIActivity,
       ai_result:    this._onAIResult,
       report_data:  this._onReportData,
@@ -954,6 +955,10 @@ class Dashboard {
 
   _onLog(data) {
     this._log.addEntry(data.level || 'INFO', data.message || '', data.timestamp);
+  }
+
+  _onTranscript(data, timestamp) {
+    this._log.appendVoice(data.speaker, data.text, timestamp);
   }
 
   _onAIActivity(data) {

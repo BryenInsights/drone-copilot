@@ -312,6 +312,12 @@ class DemoPlayer:
                 )
             elif isinstance(data, str):
                 await self._broadcaster.broadcast_log("INFO", data)
+        elif msg_type == "transcript":
+            if isinstance(data, dict):
+                await self._broadcaster.broadcast_transcript(
+                    data.get("speaker", "SYSTEM"),
+                    data.get("text", ""),
+                )
         elif msg_type == "ai_activity":
             await self._broadcaster.broadcast_ai_activity(data or {})
         elif msg_type == "ai_result":
