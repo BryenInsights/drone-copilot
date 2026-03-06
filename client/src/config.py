@@ -26,6 +26,18 @@ class ClientConfig(BaseSettings):
     INTER_COMMAND_ROTATE_DELAY: float = 2.5
     APPROACH_MOVE_DELAY: float = 1.0
     APPROACH_ROTATE_DELAY: float = 1.5
+    INSPECTION_MAX_APPROACH_STEPS: int = 10
+    INSPECTION_APPROACH_SIZE_THRESHOLD: float = 0.20
+    INSPECTION_PERCEPTION_TIMEOUT: float = 8.0
+    INSPECTION_SCAN_STEP_DEGREES: int = 90
+    INSPECTION_FORWARD_FAR: int = 40
+    INSPECTION_FORWARD_MEDIUM: int = 30
+    INSPECTION_FORWARD_CLOSE: int = 20
+    INSPECTION_CENTER_THRESHOLD: float = 0.15
+    INSPECTION_ROTATION_GAIN: float = 25.0
+    INSPECTION_LATERAL_DISTANCE: int = 35
+    INSPECTION_MAX_BLIND_STEPS: int = 3
+    INSPECTION_APPROACH_WATCHDOG_S: float = 90.0
     HEARTBEAT_INTERVAL: int = 10
     BATTERY_MIN_CONTINUE: int = 20
     BATTERY_MIN_TAKEOFF: int = 25
@@ -37,6 +49,9 @@ class ClientConfig(BaseSettings):
     BLACK_FRAME_THRESHOLD: float = 5.0
     MIN_FRAME_BYTES: int = 1000
     DJITELLOPY_RETRY_COUNT: int = 1
+    VIDEO_STREAM_FAIL_THRESHOLD: int = 30  # ~1s at 30fps
+    VIDEO_STREAM_MAX_RESTARTS: int = 3
+    VIDEO_STREAM_RESTART_DELAY: float = 2.0  # seconds between off/on
 
     # ── Gemini API ───────────────────────────────────────────────────────
     API_TIMEOUT_MS: int = 60000

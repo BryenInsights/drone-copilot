@@ -87,6 +87,38 @@ class FrameStreamer:
         self._last_perception_time = now
         return jpeg_bytes
 
+    def get_fresh_perception_frame(self, timeout: float = 3.0) -> str | None:
+        """Flush stale frames and return a guaranteed-fresh perception frame.
+
+        Used after rotation/movement to ensure Gemini sees a post-action frame.
+        Bypasses the 1 FPS rate limit and updates _last_perception_time so the
+        regular streaming loop doesn't immediately re-send.
+        """
+        frame = self._capture.flush_and_wait(timeout=timeout)
+        if frame is None:
+            return None
+
+        resized = self._resize_frame(frame, self._config.PERCEPTION_FRAME_WIDTH)
+        jpeg_bytes = self._encode_jpeg(resized)
+        if jpeg_bytes is None:
+            return None
+
+        self._last_perception_time = time.time()
+        return base64.b64encode(jpeg_bytes).decode("ascii")
+
+    def get_fresh_dashboard_frame(self, timeout: float = 3.0) -> bytes | None:
+        """Flush stale H264 frames and return a guaranteed-fresh 960x720 JPEG.
+
+        Used by the inspection phase after strafe movements to ensure
+        captured frames reflect the current camera view, not pre-movement
+        frames still in the H264 decode pipeline.
+        """
+        frame = self._capture.flush_and_wait(min_new_frames=3, timeout=timeout)
+        if frame is None:
+            return None
+        resized = cv2.resize(frame, (960, 720), interpolation=cv2.INTER_AREA)
+        return self._encode_jpeg(resized)
+
     def get_dashboard_frame(self) -> bytes | None:
         """Get 960x720 JPEG bytes for dashboard display."""
         frame = self._capture.get_frame()

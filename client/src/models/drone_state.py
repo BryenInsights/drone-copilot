@@ -19,6 +19,7 @@ class DroneState(BaseModel):
     flight_time: int = Field(default=0, ge=0)
     wifi_snr: int = 0
     takeoff_time: float | None = None
+    last_telemetry_time: float | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

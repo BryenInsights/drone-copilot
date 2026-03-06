@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 from client.src.config import ClientConfig
 from client.src.drone.command_executor import CommandExecutor
@@ -27,10 +27,48 @@ class DroneController:
         self.config = config
         self.state = DroneState(is_connected=True)
         self.safety = SafetyGuard(config, self.state)
-        self.executor = CommandExecutor(drone, config)
+        self.executor = CommandExecutor(drone, config, state=self.state)
+        self._on_emergency_land: Callable[[str], None] | None = None
+
+    def set_emergency_land_callback(self, callback: Callable[[str], None]) -> None:
+        """Register a callback invoked after an automatic emergency landing."""
+        self._on_emergency_land = callback
+
+    def _check_connection(self) -> dict | None:
+        """Return error dict if drone is disconnected, None if OK."""
+        if not self.state.is_connected:
+            return {
+                "success": False,
+                "error": "connection_lost",
+                "message": "Drone connection lost",
+            }
+        return None
+
+    def _heartbeat_safety_check(self) -> None:
+        """Periodic safety check called from heartbeat thread (outside lock)."""
+        if not self.state.is_flying:
+            return
+        self.poll_telemetry()
+        if self.safety.check_battery_critical():
+            logger.warning("Heartbeat: critical battery %d%% — auto-landing", self.state.battery)
+            self.emergency_land()
+            if self._on_emergency_land:
+                self._on_emergency_land(
+                    f"Critical battery {self.state.battery}% — auto-landed for safety"
+                )
+        elif self.safety.check_temperature_critical():
+            logger.warning(
+                "Heartbeat: critical temperature %d°C — auto-landing", self.state.temperature
+            )
+            self.emergency_land()
+            if self._on_emergency_land:
+                self._on_emergency_land(
+                    f"Critical temperature {self.state.temperature}°C — auto-landed for safety"
+                )
 
     def start(self) -> None:
         """Start heartbeat and telemetry polling."""
+        self.executor.set_heartbeat_safety_callback(self._heartbeat_safety_check)
         self.executor.start_heartbeat()
         self.poll_telemetry()
 
@@ -46,6 +84,7 @@ class DroneController:
             self.state.temperature = self.drone.get_temperature()
             self.state.flight_time = self.drone.get_flight_time()
             self.state.is_connected = True
+            self.state.last_telemetry_time = time.time()
         except Exception:
             logger.warning("Telemetry poll failed", exc_info=True)
             self.state.is_connected = False
@@ -64,6 +103,9 @@ class DroneController:
 
     def takeoff(self) -> dict:
         """Validate and execute takeoff with stabilization wait."""
+        conn_err = self._check_connection()
+        if conn_err:
+            return conn_err
         result = self.safety.validate_takeoff()
         if not result.safe:
             logger.warning("Takeoff rejected: %s", result.reason)
@@ -146,6 +188,9 @@ class DroneController:
 
     def move(self, direction: str, distance_cm: int) -> dict:
         """Validate, clamp, and execute a move command."""
+        conn_err = self._check_connection()
+        if conn_err:
+            return conn_err
         result = self.safety.validate_command()
         if not result.safe:
             return {"success": False, "error": "safety_check_failed", "message": result.reason}
@@ -178,6 +223,9 @@ class DroneController:
 
     def rotate(self, direction: str, degrees: int) -> dict:
         """Validate, clamp, and execute a rotation command."""
+        conn_err = self._check_connection()
+        if conn_err:
+            return conn_err
         result = self.safety.validate_command()
         if not result.safe:
             return {"success": False, "error": "safety_check_failed", "message": result.reason}
@@ -205,6 +253,9 @@ class DroneController:
 
     def hover(self) -> dict:
         """Stop all movement — hover in place."""
+        conn_err = self._check_connection()
+        if conn_err:
+            return conn_err
         result = self.safety.validate_command()
         if not result.safe:
             return {"success": False, "error": "safety_check_failed", "message": result.reason}
@@ -217,6 +268,9 @@ class DroneController:
 
     def set_speed(self, speed: int) -> dict:
         """Set movement speed."""
+        conn_err = self._check_connection()
+        if conn_err:
+            return conn_err
         clamped = max(10, min(100, speed))
         self.executor.execute_command(lambda: self.drone.set_speed(clamped))
         self.state.speed = clamped

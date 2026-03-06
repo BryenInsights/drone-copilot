@@ -158,21 +158,35 @@ class ToolHandler:
                 return self._controller.hover()
 
             elif name == "move_drone":
+                if self.is_mission_active:
+                    return {
+                        "success": False,
+                        "error": "mission_active",
+                        "message": "Inspection mission is controlling the drone. "
+                        "Use report_perception to guide the approach, "
+                        "or say 'stop' to cancel the mission.",
+                    }
                 result = self._controller.move(
                     params.direction, params.distance_cm,
                 )
                 if result.get("success") and self._streamer:
-                    await asyncio.sleep(1.5)  # Let fresh frame be captured
-                    self._streamer.reset_rate_limit()  # Force next frame through
+                    await self._send_fresh_frame_after_action()
                 return result
 
             elif name == "rotate_drone":
+                if self.is_mission_active:
+                    return {
+                        "success": False,
+                        "error": "mission_active",
+                        "message": "Inspection mission is controlling the drone. "
+                        "Use report_perception to guide the approach, "
+                        "or say 'stop' to cancel the mission.",
+                    }
                 result = self._controller.rotate(
                     params.direction, params.degrees,
                 )
                 if result.get("success") and self._streamer:
-                    await asyncio.sleep(1.5)  # Let fresh frame be captured
-                    self._streamer.reset_rate_limit()  # Force next frame through
+                    await self._send_fresh_frame_after_action()
                 return result
 
             elif name == "set_speed":
@@ -198,6 +212,23 @@ class ToolHandler:
                 "error": "execution_error",
                 "message": str(e),
             }
+
+    # ------------------------------------------------------------------
+    # Post-action fresh frame
+    # ------------------------------------------------------------------
+
+    async def _send_fresh_frame_after_action(self) -> None:
+        """Flush stale frames and send a guaranteed-fresh frame to Gemini."""
+        if not self._streamer:
+            return
+        b64_frame = await asyncio.to_thread(
+            self._streamer.get_fresh_perception_frame, 3.0,
+        )
+        if b64_frame:
+            await self._backend.send_video(b64_frame)
+            logger.info("Sent fresh post-action frame to Gemini")
+        else:
+            logger.warning("No fresh frame available after action")
 
     # ------------------------------------------------------------------
     # Inspection mission

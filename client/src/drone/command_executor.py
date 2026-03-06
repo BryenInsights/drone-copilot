@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable
 
 from client.src.config import ClientConfig
+from client.src.drone.exceptions import ConnectionLostError
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +41,26 @@ class CommandExecutor:
     separate thread and asyncio.Lock is not thread-safe.
     """
 
-    def __init__(self, drone: Any, config: ClientConfig) -> None:
+    def __init__(
+        self,
+        drone: Any,
+        config: ClientConfig,
+        state: Any | None = None,
+    ) -> None:
         self.drone = drone
         self.config = config
+        self._state = state
         self._lock = threading.Lock()
         self._cancellation = CancellationToken()
         self._last_command_time: float = 0.0
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_stop = threading.Event()
         self._running = False
+        self._on_heartbeat_safety: Callable[[], None] | None = None
+
+    def set_heartbeat_safety_callback(self, callback: Callable[[], None]) -> None:
+        """Register a callback to run after each heartbeat (outside the lock)."""
+        self._on_heartbeat_safety = callback
 
     def start_heartbeat(self) -> None:
         """Start the heartbeat thread to prevent 15s Tello auto-land."""
@@ -90,6 +102,13 @@ class CommandExecutor:
                     logger.warning("Heartbeat: failed to query drone", exc_info=True)
                 finally:
                     self._lock.release()
+
+                # Run safety callback outside the lock — no deadlock risk
+                if self._on_heartbeat_safety is not None:
+                    try:
+                        self._on_heartbeat_safety()
+                    except Exception:
+                        logger.warning("Heartbeat safety callback error", exc_info=True)
             else:
                 logger.debug("Heartbeat: skipped — command in progress")
 
@@ -104,6 +123,9 @@ class CommandExecutor:
 
         Returns True if command executed, False if cancelled or failed.
         """
+        if self._state is not None and not self._state.is_connected:
+            raise ConnectionLostError("Drone connection lost — cannot execute command")
+
         if self._cancellation.is_cancelled:
             logger.info("Command skipped — cancellation requested")
             return False

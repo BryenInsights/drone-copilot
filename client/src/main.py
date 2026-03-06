@@ -150,6 +150,15 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     tool_handler.set_event_loop(loop)
 
+    # Wire emergency-land notification to Gemini
+    def _on_emergency_land(reason: str) -> None:
+        asyncio.run_coroutine_threadsafe(
+            backend_client.send_text(f"[SYSTEM] {reason}. Do not attempt re-takeoff."),
+            loop,
+        )
+
+    controller.set_emergency_land_callback(_on_emergency_land)
+
     # ── Dashboard Setup ──────────────────────────────────────────────
     conn_manager = ConnectionManager()
     broadcaster = DashboardBroadcaster(conn_manager)

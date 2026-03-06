@@ -32,6 +32,8 @@ class SafetyGuard:
 
     def validate_takeoff(self) -> ValidationResult:
         """Check if takeoff is safe."""
+        if not self.state.is_connected:
+            return ValidationResult(False, "Drone connection lost")
         if self.state.is_flying:
             return ValidationResult(False, "Already flying")
         if self.state.battery < self.config.BATTERY_MIN_TAKEOFF:
@@ -50,6 +52,8 @@ class SafetyGuard:
 
     def validate_command(self) -> ValidationResult:
         """Check if a flight command can be executed."""
+        if not self.state.is_connected:
+            return ValidationResult(False, "Drone connection lost")
         if not self.state.is_flying:
             return ValidationResult(False, "Not flying")
         if self.state.battery < self.config.BATTERY_MIN_CONTINUE:

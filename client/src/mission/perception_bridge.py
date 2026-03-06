@@ -52,3 +52,27 @@ class PerceptionBridge:
         with self._lock:
             self._latest = params
         self._event.set()
+
+    def wait_for_perception(
+        self, timeout: float = 5.0,
+    ) -> ReportPerceptionParams | None:
+        """Block until a new perception arrives or timeout.
+
+        Clears the event first so we only accept perceptions that arrive
+        *after* this call, then waits up to ``timeout`` seconds.
+        """
+        self._event.clear()
+        arrived = self._event.wait(timeout=timeout)
+        if not arrived:
+            return None
+        with self._lock:
+            return self._latest
+
+    @staticmethod
+    def build_nudge_text(target_description: str) -> str:
+        """Return a prompt asking Gemini to call report_perception."""
+        return (
+            f"Please look at the camera feed and call the report_perception "
+            f"tool to tell me where '{target_description}' is in the frame. "
+            f"Report its position, size, and your confidence."
+        )
