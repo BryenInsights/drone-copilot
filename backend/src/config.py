@@ -7,7 +7,7 @@ You are Wingman, a confident and mission-focused drone copilot. \
 You speak in a casual-professional tone — like a skilled pilot who's done this a hundred times.
 
 ## Live Video Awareness
-You see live video from the drone camera at approximately 1 frame per second. \
+You see live video from the drone camera at approximately 1 frame every 5 seconds. \
 Use this to observe your surroundings and make decisions in real time. \
 Describe what you see when the user asks, and use visual information to guide your actions.
 
@@ -78,7 +78,7 @@ class BackendConfig(BaseSettings):
     GEMINI_MODEL: str = "gemini-2.5-flash-native-audio-preview-12-2025"
     VOICE_NAME: str = "Puck"
     SYSTEM_PROMPT: str = DEFAULT_SYSTEM_PROMPT
-    FRAME_RATE_TO_GEMINI: float = 1.0
+    FRAME_RATE_TO_GEMINI: float = 0.2
     AUDIO_INPUT_RATE: int = 16000
     AUDIO_OUTPUT_RATE: int = 24000
     AUDIO_CHUNK_MS: int = 100

@@ -17,13 +17,19 @@ logger = logging.getLogger(__name__)
 class FrameStreamer:
     """Encodes and streams video frames for backend (Gemini) and dashboard.
 
-    - Perception frames: 768px wide JPEG for Gemini at 1 FPS
+    - Perception frames: 768px wide JPEG for Gemini at configurable rate (default 1 per 5s)
     - Dashboard frames: 960x720 JPEG at 10 FPS
     """
 
-    def __init__(self, capture: FrameCapture, config: ClientConfig) -> None:
+    def __init__(
+        self,
+        capture: FrameCapture,
+        config: ClientConfig,
+        perception_interval: float | None = None,
+    ) -> None:
         self._capture = capture
         self._config = config
+        self._perception_interval = perception_interval or config.IDLE_FRAME_INTERVAL
         self._last_perception_time: float = 0.0
         self._video_gate = threading.Event()
         self._video_gate.set()  # Open by default — video loop sends normally
@@ -64,12 +70,11 @@ class FrameStreamer:
         self._last_perception_time = 0.0
 
     def get_perception_frame(self) -> str | None:
-        """Get base64-encoded JPEG frame for backend (768px wide, rate-limited to 1 FPS)."""
+        """Get base64-encoded JPEG frame for backend (768px wide, rate-limited)."""
         if not self._video_gate.is_set():
             return None  # Mission has exclusive control
         now = time.time()
-        interval = 1.0  # 1 FPS default for perception frames sent to Gemini
-        if now - self._last_perception_time < interval:
+        if now - self._last_perception_time < self._perception_interval:
             return None
 
         frame = self._capture.get_frame()
@@ -89,8 +94,7 @@ class FrameStreamer:
         if not self._video_gate.is_set():
             return None  # Mission has exclusive control
         now = time.time()
-        interval = 1.0  # 1 FPS default for perception frames sent to Gemini
-        if now - self._last_perception_time < interval:
+        if now - self._last_perception_time < self._perception_interval:
             return None
 
         frame = self._capture.get_frame()

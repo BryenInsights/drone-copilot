@@ -8,6 +8,7 @@ defined here with sensible defaults.
 import logging
 import sys
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -73,6 +74,29 @@ class ClientConfig(BaseSettings):
     VIDEO_STREAM_FAIL_THRESHOLD: int = 30  # ~1s at 30fps
     VIDEO_STREAM_MAX_RESTARTS: int = 3
     VIDEO_STREAM_RESTART_DELAY: float = 2.0  # seconds between off/on
+
+    # ── Cost Reduction ─────────────────────────────────────────────────
+    IDLE_FRAME_INTERVAL: float = 5.0  # Seconds between perception frames when idle
+    VAD_ENABLED: bool = True
+    VAD_AGGRESSIVENESS: int = 2  # 0-3, higher = more aggressive filtering
+    VAD_HANGOVER_CHUNKS: int = 10  # 100ms chunks to keep sending after speech stops
+
+    @field_validator("IDLE_FRAME_INTERVAL")
+    @classmethod
+    def _validate_idle_frame_interval(cls, v: float) -> float:
+        if v <= 0:
+            return 5.0
+        return v
+
+    @field_validator("VAD_AGGRESSIVENESS")
+    @classmethod
+    def _validate_vad_aggressiveness(cls, v: int) -> int:
+        return max(0, min(3, v))
+
+    @field_validator("VAD_HANGOVER_CHUNKS")
+    @classmethod
+    def _validate_vad_hangover_chunks(cls, v: int) -> int:
+        return max(0, v)
 
     # ── Gemini API ───────────────────────────────────────────────────────
     API_TIMEOUT_MS: int = 60000

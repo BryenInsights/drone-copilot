@@ -51,17 +51,21 @@ async def _audio_send_loop(
     audio_capture,
     backend_client,
     audio_playback,
+    vad=None,
 ) -> None:
     """Continuously send captured audio to backend.
 
     Discards mic audio while the copilot is speaking to prevent
     echo feedback loops (the mic picking up speaker output).
+    When VAD is enabled, also filters silent audio chunks.
     """
     while True:
         try:
             pcm_bytes = await audio_capture.queue.get()
             if audio_playback.is_playing:
                 continue  # Discard echo — copilot is speaking
+            if vad is not None and not vad.should_forward(pcm_bytes):
+                continue  # Silence — skip sending
             await backend_client.send_audio(pcm_bytes)
         except asyncio.CancelledError:
             break
@@ -143,6 +147,19 @@ async def main() -> None:
     backend_client = BackendClient(config)
     audio_capture = AudioCapture(sample_rate=16000)
     audio_playback = AudioPlayback(sample_rate=24000)
+
+    # Voice Activity Detection (filters silence before sending to Gemini)
+    vad = None
+    if config.VAD_ENABLED:
+        from client.src.audio.vad import VoiceActivityDetector
+
+        vad = VoiceActivityDetector(
+            sample_rate=16000,
+            aggressiveness=config.VAD_AGGRESSIVENESS,
+            hangover_max=config.VAD_HANGOVER_CHUNKS,
+        )
+        logger.info("VAD enabled (aggressiveness=%d, hangover=%d chunks)",
+                     config.VAD_AGGRESSIVENESS, config.VAD_HANGOVER_CHUNKS)
     frame_capture = FrameCapture(drone, config)
     frame_streamer = FrameStreamer(frame_capture, config)
     tool_handler = ToolHandler(controller, backend_client, frame_streamer)
@@ -324,7 +341,7 @@ async def main() -> None:
         # Launch concurrent tasks
         tasks = [
             asyncio.create_task(
-                _audio_send_loop(audio_capture, backend_client, audio_playback),
+                _audio_send_loop(audio_capture, backend_client, audio_playback, vad),
                 name="audio_send",
             ),
             asyncio.create_task(
