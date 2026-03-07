@@ -66,6 +66,7 @@ class StartInspectionParams(BaseModel):
 
     target_description: str = Field(min_length=1)
     aspects: str | None = None
+    needs_search: bool = False
 
 
 class ReportPerceptionParams(BaseModel):

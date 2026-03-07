@@ -35,6 +35,7 @@ class Mission(BaseModel):
     status: MissionStatus = MissionStatus.IDLE
     target_description: str | None = None
     started_at: float | None = None
+    final_relative_size: float | None = None
 
 
 class InvalidTransitionError(Exception):

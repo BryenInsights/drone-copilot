@@ -26,7 +26,14 @@ class GeminiSession:
 
     def __init__(self, config: BackendConfig) -> None:
         self._config = config
-        self._client = genai.Client(api_key=config.GEMINI_API_KEY)
+        if config.USE_VERTEX_AI:
+            self._client = genai.Client(
+                vertexai=True,
+                project=config.GCP_PROJECT,
+                location=config.GCP_LOCATION,
+            )
+        else:
+            self._client = genai.Client(api_key=config.GEMINI_API_KEY)
         self._session: Any | None = None
         self._cm: Any | None = None
         self._session_handle: str | None = None
@@ -58,7 +65,8 @@ class GeminiSession:
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             context_window_compression=types.ContextWindowCompressionConfig(
-                sliding_window=types.SlidingWindow(),
+                trigger_tokens=100000,
+                sliding_window=types.SlidingWindow(target_tokens=80000),
             ),
             session_resumption=resumption_cfg,
             realtime_input_config=types.RealtimeInputConfig(

@@ -79,6 +79,7 @@ async def _response_watchdog(backend_client, watchdog_state) -> None:
                 watchdog_state["last_user_ts"] > watchdog_state["last_copilot_ts"]
                 and now - watchdog_state["last_user_ts"] > 8.0
                 and not watchdog_state["nudged"]
+                and not watchdog_state["tool_in_progress"]
             ):
                 logger.warning("Watchdog: AI silent >8s after user speech, sending nudge")
                 await backend_client.send_text(
@@ -223,6 +224,10 @@ async def main() -> None:
             "target": mission.target_description or "",
         })
     )
+    tool_handler.add_command_log_listener(
+        lambda msg: broadcaster.send_log_sync("COMMAND", msg)
+    )
+    tool_handler.add_perception_listener(broadcaster.send_perception_sync)
 
     # Emergency landing function
     def emergency_shutdown(reason: str = "signal") -> None:
@@ -270,7 +275,9 @@ async def main() -> None:
         "last_user_ts": 0.0,
         "last_copilot_ts": 0.0,
         "nudged": False,
+        "tool_in_progress": False,
     }
+    tool_handler.set_watchdog_state(watchdog_state)
 
     def on_transcript(speaker: str, text: str, timestamp: float) -> None:
         logger.info("[%s] %s", speaker.upper(), text)

@@ -107,14 +107,15 @@ def build_tool_declarations() -> list[types.Tool]:
         types.FunctionDeclaration(
             name="report_perception",
             description=(
-                "Optional: Report your visual perception of the target to the dashboard. "
-                "Call this when you spot the target to share position data with the "
-                "dashboard visualization. Not required for movement decisions. "
+                "Report your visual perception of the target. "
+                "During active missions: REQUIRED — drives navigation. Call promptly when asked. "
+                "Outside missions: if response shows mission_active=false, stop calling this "
+                "and use move_drone/rotate_drone instead. "
                 "Use these calibration anchors for relative_size: "
                 "0.03-0.08 = tiny/far (3m+), 0.08-0.15 = small/medium-far (1.5-3m), "
-                "0.15-0.25 = medium/close (0.8-1.5m), 0.25-0.40 = large/very close (<0.8m). "
-                "For offsets: -1.0 = far left/top edge, 0.0 = centered, "
-                "+1.0 = far right/bottom edge."
+                "0.15-0.25 = medium/close (0.8-1.5m), 0.25-0.50 = large/very close (<0.8m). "
+                "For offsets: -1.0 = far left/bottom edge, 0.0 = centered, "
+                "+1.0 = far right/top edge."
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
@@ -133,7 +134,7 @@ def build_tool_declarations() -> list[types.Tool]:
                     "vertical_offset": types.Schema(
                         type=types.Type.NUMBER,
                         description=(
-                            "Vertical position: -1.0 (top edge) to +1.0 "
+                            "Vertical position: +1.0 (top edge) to -1.0 "
                             "(bottom edge), 0.0 = centered in frame"
                         ),
                     ),
@@ -142,7 +143,7 @@ def build_tool_declarations() -> list[types.Tool]:
                         description=(
                             "Target width divided by frame width. "
                             "0.03-0.08=far, 0.08-0.15=medium-far, "
-                            "0.15-0.25=medium-close, 0.25-0.40=close"
+                            "0.15-0.25=medium-close, 0.25-0.50=close"
                         ),
                     ),
                     "confidence": types.Schema(
@@ -165,10 +166,11 @@ def build_tool_declarations() -> list[types.Tool]:
         types.FunctionDeclaration(
             name="start_inspection",
             description=(
-                "Begin a detailed inspection of a nearby object. The drone approaches "
+                "Begin a detailed inspection of an object. The drone approaches "
                 "the target, captures views from multiple angles, and provides a detailed "
                 "verbal assessment. Call this when the user asks to 'check', 'inspect', "
-                "or 'look at' something."
+                "or 'look at' something. Set needs_search=true if the target is NOT "
+                "currently visible — the drone will perform an autonomous 360-degree scan."
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
@@ -185,6 +187,13 @@ def build_tool_declarations() -> list[types.Tool]:
                         description=(
                             "Optional: specific aspects to examine, e.g. "
                             "'check for damage', 'look at the label'"
+                        ),
+                    ),
+                    "needs_search": types.Schema(
+                        type=types.Type.BOOLEAN,
+                        description=(
+                            "Set true if target is NOT visible in the current view. "
+                            "The drone will perform an autonomous 360-degree scan to find it."
                         ),
                     ),
                 },

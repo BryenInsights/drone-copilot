@@ -155,9 +155,11 @@ class CanvasRenderer {
     if (alpha <= 0) return;
 
     const p = this._perception;
-    const tx = cx + p.horizontal_offset * (w / 2);
-    const ty = cy + p.vertical_offset * (h / 2);
-    const radius = Math.max(20, p.relative_size * w * 0.5);
+    // 0.9 margin keeps reticle from clipping at edges;
+    // negate vertical because +1.0 = top in Gemini but Y increases downward on screen
+    const tx = cx + p.horizontal_offset * cx * 0.9;
+    const ty = cy - p.vertical_offset * cy * 0.9;
+    const radius = Math.max(10, Math.min(22, p.relative_size * w * 0.08));
 
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -167,8 +169,8 @@ class CanvasRenderer {
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(tx - 14, ty); ctx.lineTo(tx + 14, ty);
-    ctx.moveTo(tx, ty - 14); ctx.lineTo(tx, ty + 14);
+    ctx.moveTo(tx - 8, ty); ctx.lineTo(tx + 8, ty);
+    ctx.moveTo(tx, ty - 8); ctx.lineTo(tx, ty + 8);
     ctx.stroke();
 
     // Confidence circle
@@ -178,31 +180,12 @@ class CanvasRenderer {
     ctx.arc(tx, ty, radius, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Box corners (15px marks)
-    const cs = 15;
-    const bx = tx - radius;
-    const by = ty - radius;
-    const bw = radius * 2;
-    const bh = radius * 2;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    // top-left
-    ctx.moveTo(bx, by + cs); ctx.lineTo(bx, by); ctx.lineTo(bx + cs, by);
-    // top-right
-    ctx.moveTo(bx + bw - cs, by); ctx.lineTo(bx + bw, by); ctx.lineTo(bx + bw, by + cs);
-    // bottom-right
-    ctx.moveTo(bx + bw, by + bh - cs); ctx.lineTo(bx + bw, by + bh); ctx.lineTo(bx + bw - cs, by + bh);
-    // bottom-left
-    ctx.moveTo(bx + cs, by + bh); ctx.lineTo(bx, by + bh); ctx.lineTo(bx, by + bh - cs);
-    ctx.stroke();
-
     // Confidence text
     if (p.target_visible) {
       const conf = Math.round(p.confidence * 100);
       ctx.fillStyle = color;
       ctx.font = '600 12px "DM Sans", sans-serif';
-      ctx.fillText(conf + '%', tx + radius + 6, ty - 4);
+      ctx.fillText(conf + '%', tx + radius + 4, ty - 2);
     }
 
     // Obstacle warning

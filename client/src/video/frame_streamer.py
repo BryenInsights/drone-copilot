@@ -2,6 +2,7 @@
 
 import base64
 import logging
+import threading
 import time
 
 import cv2
@@ -24,6 +25,8 @@ class FrameStreamer:
         self._capture = capture
         self._config = config
         self._last_perception_time: float = 0.0
+        self._video_gate = threading.Event()
+        self._video_gate.set()  # Open by default — video loop sends normally
 
     def _resize_frame(self, frame: np.ndarray, target_width: int) -> np.ndarray:
         """Resize frame maintaining aspect ratio."""
@@ -42,6 +45,17 @@ class FrameStreamer:
             return None
         return jpeg_bytes
 
+    def pause_perception_stream(self) -> None:
+        """Pause continuous perception stream. Mission takes exclusive frame control."""
+        self._video_gate.clear()
+        logger.debug("Perception stream paused — mission has exclusive frame control")
+
+    def resume_perception_stream(self) -> None:
+        """Resume continuous perception stream. Resets rate limit for immediate send."""
+        self._video_gate.set()
+        self._last_perception_time = 0.0
+        logger.debug("Perception stream resumed")
+
     def reset_rate_limit(self) -> None:
         """Reset perception rate limit so the next frame goes through immediately.
 
@@ -51,6 +65,8 @@ class FrameStreamer:
 
     def get_perception_frame(self) -> str | None:
         """Get base64-encoded JPEG frame for backend (768px wide, rate-limited to 1 FPS)."""
+        if not self._video_gate.is_set():
+            return None  # Mission has exclusive control
         now = time.time()
         interval = 1.0  # 1 FPS default for perception frames sent to Gemini
         if now - self._last_perception_time < interval:
@@ -70,6 +86,8 @@ class FrameStreamer:
 
     def get_perception_frame_bytes(self) -> bytes | None:
         """Get raw JPEG bytes for backend (768px wide, rate-limited)."""
+        if not self._video_gate.is_set():
+            return None  # Mission has exclusive control
         now = time.time()
         interval = 1.0  # 1 FPS default for perception frames sent to Gemini
         if now - self._last_perception_time < interval:
@@ -105,6 +123,18 @@ class FrameStreamer:
 
         self._last_perception_time = time.time()
         return base64.b64encode(jpeg_bytes).decode("ascii")
+
+    def get_fresh_perception_frame_bytes(self, timeout: float = 3.0) -> bytes | None:
+        """Flush stale frames and return fresh perception JPEG as raw bytes."""
+        frame = self._capture.flush_and_wait(timeout=timeout)
+        if frame is None:
+            return None
+        resized = self._resize_frame(frame, self._config.PERCEPTION_FRAME_WIDTH)
+        jpeg_bytes = self._encode_jpeg(resized)
+        if jpeg_bytes is None:
+            return None
+        self._last_perception_time = time.time()
+        return jpeg_bytes
 
     def get_fresh_dashboard_frame(self, timeout: float = 3.0) -> bytes | None:
         """Flush stale H264 frames and return a guaranteed-fresh 960x720 JPEG.

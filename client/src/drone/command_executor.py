@@ -94,8 +94,18 @@ class CommandExecutor:
             # Non-blocking acquire — skip if a command is in progress (lesson C5)
             if self._lock.acquire(blocking=False):
                 try:
-                    self.drone.query_battery()
-                    logger.debug("Heartbeat: battery query sent")
+                    use_rc = (
+                        self._state is not None
+                        and self._state.is_flying
+                        and self._state.takeoff_time is not None
+                        and (time.time() - self._state.takeoff_time) > 5.0
+                    )
+                    if use_rc:
+                        self.drone.send_rc_control(0, 0, 0, 0)
+                        logger.debug("Heartbeat: hover keepalive sent")
+                    else:
+                        self.drone.query_battery()
+                        logger.debug("Heartbeat: battery query sent")
                 except (ValueError, TypeError):
                     pass  # UDP response mismatch — harmless
                 except Exception:

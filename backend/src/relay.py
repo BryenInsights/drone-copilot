@@ -54,6 +54,7 @@ class Relay:
         self._last_user_text: str | None = None
         self._last_tool_calls: list[str] = []
         self._active_task: str | None = None
+        self._active_mission_context: dict | None = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -130,6 +131,14 @@ class Relay:
             parts.append(f"Recent tool calls: {recent}")
         if self._last_user_text:
             parts.append(f"Last user request: {self._last_user_text}")
+        if self._active_mission_context:
+            ctx = self._active_mission_context
+            parts.append(
+                f"ACTIVE MISSION: {ctx.get('phase', 'unknown')} phase, "
+                f"target='{ctx.get('target', 'unknown')}'. "
+                f"You MUST call report_perception when you see frames with perception nudges. "
+                f"Do NOT call move_drone or rotate_drone — the mission controller is flying."
+            )
         parts.append("Continue from where you left off.")
         context = " ".join(parts)
         try:
@@ -175,6 +184,10 @@ class Relay:
                     frames_bytes = [base64.b64decode(f) for f in frames_b64]
                     prompt = msg.get("prompt", "")
                     await self._session.send_frames_with_prompt(frames_bytes, prompt)
+
+                elif msg_type == "mission_context":
+                    self._active_mission_context = msg.get("context")
+                    logger.info("Mission context updated: %s", self._active_mission_context)
 
                 else:
                     logger.warning("Unknown client message type: %s", msg_type)

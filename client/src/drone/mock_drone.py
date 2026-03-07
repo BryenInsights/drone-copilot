@@ -119,6 +119,16 @@ class MockDrone:
         self._drain_battery(1)
         logger.info("MockDrone: move_down %dcm, altitude=%dcm", distance, self._height)
 
+    def curve_xyz_speed(
+        self, x1: int, y1: int, z1: int, x2: int, y2: int, z2: int, speed: int,
+    ) -> None:
+        self._validate_flying("curve_xyz_speed")
+        self._drain_battery(2)
+        logger.info(
+            "MockDrone: curve_xyz_speed mid=(%d,%d,%d) end=(%d,%d,%d) speed=%d",
+            x1, y1, z1, x2, y2, z2, speed,
+        )
+
     def rotate_clockwise(self, degrees: int) -> None:
         self._validate_flying("rotate_clockwise")
         self._drain_battery(1)
@@ -136,6 +146,10 @@ class MockDrone:
     def send_rc_control(self, lr: int, fb: int, ud: int, yaw: int) -> None:
         """RC control — used for hover (all zeros = stop)."""
         logger.debug("MockDrone: rc_control lr=%d fb=%d ud=%d yaw=%d", lr, fb, ud, yaw)
+
+    def query_battery(self) -> int:
+        """Query battery (SDK command used by heartbeat)."""
+        return self._battery
 
     def get_battery(self) -> int:
         return self._battery

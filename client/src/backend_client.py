@@ -118,6 +118,16 @@ class BackendClient:
         except Exception:
             logger.warning("Failed to send text", exc_info=True)
 
+    async def send_mission_context(self, context: dict | None) -> None:
+        """Send mission context to backend for reconnection awareness."""
+        if not self._connected or self._ws is None:
+            return
+        msg = {"type": "mission_context", "context": context}
+        try:
+            await self._ws.send(json.dumps(msg))
+        except Exception:
+            logger.warning("Failed to send mission context", exc_info=True)
+
     async def send_frames_with_prompt(
         self, frames_jpeg: list[bytes], prompt: str
     ) -> None:
