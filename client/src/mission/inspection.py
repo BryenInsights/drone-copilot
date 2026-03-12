@@ -1,10 +1,10 @@
-"""Inspection mission — approach target with perception loop + 45-degree orbit arcs.
+"""Inspection mission — approach target with perception loop + lateral strafe views.
 
 Three phases (when needs_search=True):
-1. SEARCHING: Deterministic 360-degree scan using PerceptionBridge to find target.
+1. SEARCHING: Deterministic 360-degree scan using Flash API (visual_client) to find target.
 2. APPROACHING: Use perception bridge to center on and approach the target
    until it fills enough of the frame (or max steps / stagnation / blind limit).
-3. INSPECTING: 45-degree orbit arcs to capture 3 perspectives (front, right-angled,
+3. INSPECTING: Lateral strafe + rotation to capture 3 perspectives (front, right-angled,
    left-angled) then send batch to Gemini for comprehensive verbal summary.
 
 When needs_search=False, skips phase 1.
@@ -13,24 +13,35 @@ Does NOT auto-land — stays hovering for follow-up commands.
 
 from __future__ import annotations
 
-import base64
 import logging
-import math
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from client.src.config import ClientConfig
 from client.src.mission.perception_bridge import PerceptionBridge
 from client.src.models.mission import Mission, MissionStateMachine, MissionStatus, MissionType
-from client.src.models.tool_calls import ReportPerceptionParams
+from client.src.perception.visual import PerceptionResponse, RateLimitError
 
 if TYPE_CHECKING:
     from client.src.drone.controller import DroneController
     from client.src.video.frame_streamer import FrameStreamer
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ReportCollector:
+    """Collects frames and metadata during inspection for post-mission report."""
+
+    acquisition_frame: bytes | None = None
+    inspection_frames: list[tuple[bytes, str]] = field(default_factory=list)
+    phases_completed: list[str] = field(default_factory=list)
+    started_at: float | None = None
+    finished_at: float | None = None
+    inspection_report: Any = None  # InspectionReport from visual.py
 
 
 class InspectionMission:
@@ -46,23 +57,23 @@ class InspectionMission:
         frame_streamer: FrameStreamer,
         config: ClientConfig,
         perception_bridge: PerceptionBridge,
+        visual_client: Any = None,
         send_text_fn: Any = None,
-        send_frames_fn: Any = None,
-        send_video_fn: Any = None,
-        send_frame_with_prompt_fn: Any = None,
         on_status_change: Any = None,
         on_command_log: Any = None,
+        on_perception_broadcast: Any = None,
+        on_ai_activity: Any = None,
     ) -> None:
         self._controller = controller
         self._streamer = frame_streamer
         self._config = config
         self._perception = perception_bridge
+        self._visual_client = visual_client
         self._send_text = send_text_fn
-        self._send_frames = send_frames_fn
-        self._send_video = send_video_fn
-        self._send_frame_with_prompt = send_frame_with_prompt_fn
         self._on_status_change = on_status_change
         self._on_command_log = on_command_log
+        self._on_perception_broadcast = on_perception_broadcast
+        self._on_ai_activity = on_ai_activity
         self._abort_event = threading.Event()
         self._mission: Mission | None = None
         self._sm: MissionStateMachine | None = None
@@ -71,10 +82,15 @@ class InspectionMission:
         self._debug_frame_counter: int = 0
         self._consecutive_send_failures: int = 0
         self._max_send_failures: int = 3
+        self._report = ReportCollector()
 
     @property
     def mission(self) -> Mission | None:
         return self._mission
+
+    @property
+    def report(self) -> ReportCollector:
+        return self._report
 
     def abort(self) -> None:
         """Abort the mission."""
@@ -102,6 +118,28 @@ class InspectionMission:
             except Exception:
                 logger.warning("Command log callback error", exc_info=True)
 
+    def _broadcast_approach_perception(
+        self, response: Any, h_off: float, v_off: float, rel_size: float,
+    ) -> None:
+        """Broadcast approach perception data to dashboard overlay."""
+        if not self._on_perception_broadcast:
+            return
+        from client.src.models.tool_calls import DashboardPerception
+
+        perc = DashboardPerception.from_visual_perception(response, h_off, v_off, rel_size)
+        try:
+            self._on_perception_broadcast(perc)
+        except Exception:
+            logger.debug("Perception broadcast error", exc_info=True)
+
+    def _broadcast_ai_activity(self, call_type: str, model: str = "gemini-2.5-flash") -> None:
+        """Broadcast AI activity event for dashboard API cost tracking."""
+        if self._on_ai_activity:
+            try:
+                self._on_ai_activity({"model": model, "call_type": call_type, "source": "flash"})
+            except Exception:
+                logger.debug("AI activity broadcast error", exc_info=True)
+
     def _track_send_success(self) -> None:
         self._consecutive_send_failures = 0
 
@@ -116,7 +154,7 @@ class InspectionMission:
 
     def _send_text_sync(self, text: str) -> None:
         """Send text to Gemini session from synchronous mission thread."""
-        if self._send_text and self._loop:
+        if self._send_text and self._loop and not self._loop.is_closed():
             import asyncio
 
             future = asyncio.run_coroutine_threadsafe(self._send_text(text), self._loop)
@@ -143,80 +181,18 @@ class InspectionMission:
         (self._debug_frame_dir / filename).write_bytes(frame_bytes)
         logger.info("Saved debug frame: %s (%d bytes)", filename, len(frame_bytes))
 
-    def _send_fresh_frame_sync(
-        self, target_description: str, debug_label: str = "", preamble: str = "",
-    ) -> None:
-        """Get a fresh frame and send it with the perception nudge in a single Gemini turn."""
-        if not self._streamer:
-            return
-
-        frame_bytes = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
-        if not frame_bytes:
-            logger.warning("No fresh frame available — sending text-only nudge")
-            self._send_text_sync(PerceptionBridge.build_nudge_text(target_description))
-            return
-
-        logger.info("Fresh frame: %d bytes [%s]", len(frame_bytes), debug_label or "perception")
-
-        # Save to disk for debugging
-        self._save_debug_frame(frame_bytes, debug_label or "perception")
-
-        # Send frame + nudge together via send_client_content
-        nudge = PerceptionBridge.build_nudge_text(target_description)
-        if preamble:
-            nudge = preamble + "\n\n" + nudge
-
-        if self._send_frame_with_prompt and self._loop:
-            import asyncio
-
-            future = asyncio.run_coroutine_threadsafe(
-                self._send_frame_with_prompt([frame_bytes], nudge), self._loop,
-            )
-            try:
-                future.result(timeout=5.0)
-                self._track_send_success()
-            except Exception:
-                logger.warning("Failed to send frame+nudge to Gemini", exc_info=True)
-                self._track_send_failure()
-        else:
-            # Fallback: send separately (less reliable)
-            if self._send_video and self._loop:
-                import asyncio
-
-                frame_b64 = base64.b64encode(frame_bytes).decode("ascii")
-                future = asyncio.run_coroutine_threadsafe(
-                    self._send_video(frame_b64), self._loop,
-                )
-                try:
-                    future.result(timeout=5.0)
-                except Exception:
-                    logger.warning("Failed to send fresh frame", exc_info=True)
-            time.sleep(0.5)
-            self._send_text_sync(nudge)
-
-    def _send_inspection_frames_sync(
-        self,
-        frames: list[bytes],
-        labels: list[str],
-        target: str,
-        aspects: str | None,
-    ) -> None:
-        """Send captured inspection frames to Gemini for analysis."""
-        if self._send_frames and self._loop:
-            import asyncio
-
-            future = asyncio.run_coroutine_threadsafe(
-                self._send_frames(frames, labels, target, aspects), self._loop,
-            )
-            try:
-                future.result(timeout=30.0)
-            except Exception:
-                logger.warning("Failed to send inspection frames to Gemini", exc_info=True)
-
     def _check_abort(self) -> None:
         """Raise if abort requested."""
         if self._abort_event.is_set():
             raise RuntimeError("Inspection aborted by user")
+
+    def _interruptible_sleep(self, duration: float, interval: float = 0.25) -> None:
+        """Sleep in small intervals, checking abort between each."""
+        end = time.monotonic() + duration
+        while time.monotonic() < end:
+            if self._abort_event.is_set():
+                raise RuntimeError("Inspection aborted by user")
+            time.sleep(min(interval, end - time.monotonic()))
 
     def run(
         self,
@@ -228,6 +204,7 @@ class InspectionMission:
 
         Phases: [searching →] approaching → inspecting → complete/aborted
         """
+        self._report = ReportCollector(started_at=time.time())
         self._mission = Mission(
             type=MissionType.INSPECT,
             status=MissionStatus.IDLE,
@@ -252,6 +229,19 @@ class InspectionMission:
 
             self._check_abort()
 
+            # Pause perception stream for mission phases (resumed in finally)
+            if self._streamer:
+                self._streamer.pause_perception_stream()
+
+            # Inform Gemini of flight status — perception stream is paused so
+            # the model may still see stale pre-takeoff frames.
+            altitude = self._controller.state.altitude or 70
+            self._send_text_sync(
+                f"The drone is flying at {altitude}cm altitude. "
+                f"Video perception is paused during autonomous approach — "
+                f"rely on my text updates for status, not the video feed."
+            )
+
             # Notify Gemini about the inspection
             self._send_text_sync(
                 f"Starting inspection of: {target_description}. "
@@ -261,6 +251,11 @@ class InspectionMission:
             )
 
             # --- Phase 1: Search (optional) ---
+            # NOTE: heartbeat stays running during search — the search phase has long
+            # gaps between drone commands (Gemini API calls ~10-15s) and pausing
+            # the heartbeat would trigger Tello's 15s auto-land (lesson A4).
+            # The heartbeat uses non-blocking lock acquire so it won't conflict
+            # with mission commands (lesson C5).
             if needs_search:
                 sm.transition(MissionStatus.SEARCHING)
                 self._notify_status()
@@ -277,6 +272,65 @@ class InspectionMission:
                     return self._mission
 
                 self._check_abort()
+                self._report.phases_completed.append("search")
+
+            # Capture acquisition frame if not already captured (search skipped)
+            if self._report.acquisition_frame is None and self._streamer:
+                acq = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
+                if acq:
+                    self._report.acquisition_frame = acq
+                    logger.info(
+                        "Report: saved acquisition frame at approach start (%d bytes)", len(acq),
+                    )
+
+            # Pre-approach verification: when search was skipped, confirm Flash
+            # can see the target before committing to approach.
+            if not needs_search and self._visual_client and self._streamer:
+                verify_frame = self._streamer.get_fresh_perception_frame_bytes(
+                    timeout=3.0, min_new_frames=30,
+                )
+                if verify_frame:
+                    try:
+                        verify_resp = self._visual_client.detect(
+                            verify_frame, target_description,
+                        )
+                        self._broadcast_ai_activity("search_detect")
+                    except RateLimitError:
+                        verify_resp = PerceptionResponse(
+                            target_visible=False, confidence=0.0,
+                        )
+                    logger.info(
+                        "Pre-approach verify: visible=%s conf=%.2f",
+                        verify_resp.target_visible, verify_resp.confidence,
+                    )
+                    if (
+                        not verify_resp.target_visible
+                        or verify_resp.confidence < self._config.SEARCH_MIN_CONFIDENCE
+                    ):
+                        logger.warning(
+                            "Target not confirmed by Flash — falling back to search",
+                        )
+                        self._send_text_sync(
+                            "I cannot confirm the target visually. "
+                            "Running a search scan.",
+                        )
+                        sm.transition(MissionStatus.SEARCHING)
+                        self._notify_status()
+                        found = self._run_search_phase(target_description)
+                        if not found:
+                            self._send_text_sync(
+                                f"Could not find '{target_description}' after a "
+                                f"full 360-degree scan. Manual control restored.",
+                            )
+                            sm.try_transition(MissionStatus.ABORTED)
+                            self._notify_status()
+                            return self._mission
+                        self._check_abort()
+                        self._report.phases_completed.append("search")
+
+            # Pause heartbeat during approach/inspection — rapid drone commands keep
+            # connection alive and heartbeat could cause UDP response interleaving.
+            self._controller.executor.pause_heartbeat()
 
             # --- Phase 2: Approach ---
             sm.transition(MissionStatus.APPROACHING)
@@ -287,12 +341,16 @@ class InspectionMission:
             )
 
             self._send_text_sync(
-                "Starting approach phase. "
-                "Use report_perception to tell me EXACTLY where the target "
-                "is in the current frame. This is required after every movement.",
+                "Starting approach phase. I will use visual perception to guide "
+                "the drone toward the target automatically.",
             )
             self._run_approach_phase(target_description)
 
+            self._check_abort()
+            self._report.phases_completed.append("approach")
+
+            # --- Final centering before inspection ---
+            self._final_centering(target_description)
             self._check_abort()
 
             # --- Phase 3: Lateral strafe inspection ---
@@ -301,7 +359,14 @@ class InspectionMission:
 
             self._run_inspection_phase(target_description, aspects)
 
-            sm.transition(MissionStatus.COMPLETE)
+            self._report.phases_completed.append("inspect")
+            self._report.finished_at = time.time()
+            if not sm.try_transition(MissionStatus.COMPLETE):
+                logger.warning(
+                    "Could not transition to COMPLETE (current=%s) — likely aborted concurrently",
+                    sm.status.value,
+                )
+                return self._mission
             self._notify_status()
             logger.info("Inspection mission completed — drone hovering for follow-up")
             size_info = ""
@@ -320,7 +385,23 @@ class InspectionMission:
             sm.try_transition(MissionStatus.ABORTED)
             self._perception.deactivate()
             self._notify_status()
-            self._send_text_sync("Inspection stopped. Manual control restored.")
+            # Generate partial report from any frames captured before the failure
+            if self._report.inspection_frames and self._visual_client:
+                try:
+                    frames = [f for f, _ in self._report.inspection_frames]
+                    labels = [lbl for _, lbl in self._report.inspection_frames]
+                    self._report.inspection_report = self._visual_client.generate_report(
+                        frames, labels, target_description, aspects,
+                    )
+                    self._send_text_sync(
+                        f"Inspection error: {e}. Generated partial report from "
+                        f"{len(frames)} perspective(s). Manual control restored."
+                    )
+                except Exception:
+                    logger.warning("Partial report generation failed", exc_info=True)
+                    self._send_text_sync("Inspection stopped. Manual control restored.")
+            else:
+                self._send_text_sync("Inspection stopped. Manual control restored.")
             return self._mission
 
         except Exception:
@@ -328,10 +409,31 @@ class InspectionMission:
             sm.try_transition(MissionStatus.ABORTED)
             self._perception.deactivate()
             self._notify_status()
-            self._send_text_sync("Inspection stopped. Manual control restored.")
+            # Generate partial report from any frames captured before the failure
+            if self._report.inspection_frames and self._visual_client:
+                try:
+                    frames = [f for f, _ in self._report.inspection_frames]
+                    labels = [lbl for _, lbl in self._report.inspection_frames]
+                    self._report.inspection_report = self._visual_client.generate_report(
+                        frames, labels, target_description, aspects,
+                    )
+                    self._send_text_sync(
+                        f"Inspection failed but generated partial report from "
+                        f"{len(frames)} perspective(s). Manual control restored."
+                    )
+                except Exception:
+                    logger.warning("Partial report generation failed", exc_info=True)
+                    self._send_text_sync("Inspection stopped. Manual control restored.")
+            else:
+                self._send_text_sync("Inspection stopped. Manual control restored.")
             if self._controller.state.is_flying:
                 self._controller.emergency_land()
             return self._mission
+
+        finally:
+            self._controller.executor.resume_heartbeat()
+            if self._streamer:
+                self._streamer.resume_perception_stream()
 
     # ------------------------------------------------------------------
     # Phase 1: Deterministic search scan
@@ -340,92 +442,106 @@ class InspectionMission:
     def _run_search_phase(self, target_description: str) -> bool:
         """Deterministic 360-degree scan to find the target.
 
-        Rotates SEARCH_ROTATION_STEP degrees at each position, sends fresh
-        frames, and waits for perception. Returns True if target found.
+        Rotates SEARCH_ROTATION_STEP degrees at each position, uses Flash API
+        (visual_client.detect) for perception. Returns True if target found.
         """
         cfg = self._config
-        self._perception.activate()
-        if self._streamer:
-            self._streamer.pause_perception_stream()
+        total = cfg.SEARCH_MAX_POSITIONS
 
-        try:
-            for position in range(cfg.SEARCH_MAX_POSITIONS):
-                self._check_abort()
+        for position in range(total):
+            self._check_abort()
 
-                # Rotate (skip on first position — use current heading)
-                if position > 0:
-                    self._controller.rotate("clockwise", cfg.SEARCH_ROTATION_STEP)
-                    self._log_command(f"Rotate CW {cfg.SEARCH_ROTATION_STEP}° (search scan)")
-                    time.sleep(cfg.APPROACH_ROTATE_DELAY)
-
-                # Send fresh frame with narration + perception nudge in single turn
-                self._send_fresh_frame_sync(
-                    target_description,
-                    debug_label=f"search_pos{position + 1}",
-                    preamble=f"Scanning position {position + 1}/{cfg.SEARCH_MAX_POSITIONS}...",
+            # Detect if drone auto-landed (Tello 15s timeout — lesson A4)
+            if not self._controller.state.is_flying:
+                logger.error("Drone no longer flying during search — aborting")
+                self._send_text_sync(
+                    "Search aborted — drone is no longer airborne. "
+                    "It may have auto-landed due to inactivity."
                 )
+                return False
 
-                # Wait for perception
-                perception = self._perception.wait_for_perception(
-                    timeout=cfg.SEARCH_PERCEPTION_TIMEOUT,
+            # Rotate (skip on first position — use current heading)
+            if position > 0:
+                result = self._controller.rotate("clockwise", cfg.SEARCH_ROTATION_STEP)
+                if not result.get("success"):
+                    logger.error("Search rotation failed: %s — aborting", result)
+                    self._send_text_sync("Search aborted — rotation command failed.")
+                    return False
+                self._log_command(f"Rotate CW {cfg.SEARCH_ROTATION_STEP}° (search scan)")
+                self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
+
+            self._check_abort()
+
+            # Get fresh frame and run Flash API detection
+            frame_bytes = self._streamer.get_fresh_perception_frame_bytes(
+                timeout=3.0, min_new_frames=30 if position > 0 else 10,
+            )
+            if not frame_bytes:
+                logger.warning("No fresh frame at search position %d", position + 1)
+                continue
+
+            self._save_debug_frame(frame_bytes, f"search_pos{position + 1}")
+
+            try:
+                response = self._visual_client.detect(frame_bytes, target_description)
+                self._broadcast_ai_activity("search_detect")
+            except RateLimitError as e:
+                logger.warning(
+                    "Rate limited at search position %d — waiting %.0fs and retrying",
+                    position + 1, e.retry_after,
                 )
-
-                # Retry once with nudge if no response
-                if perception is None:
-                    logger.info("No perception at position %d — retrying with nudge", position + 1)
-                    self._send_fresh_frame_sync(
-                        target_description, debug_label=f"search_pos{position + 1}_retry",
-                    )
-                    perception = self._perception.wait_for_perception(timeout=5.0)
-
-                if perception is None:
-                    logger.info("No perception at position %d", position + 1)
+                self._send_text_sync(
+                    f"Rate limited at position {position + 1} of {total}. "
+                    f"Waiting {int(e.retry_after)} seconds before retrying."
+                )
+                self._interruptible_sleep(min(e.retry_after, 60.0))
+                # Retry once with a fresh frame
+                frame_bytes = self._streamer.get_fresh_perception_frame_bytes(
+                    timeout=3.0, min_new_frames=10,
+                )
+                if not frame_bytes:
+                    continue
+                try:
+                    response = self._visual_client.detect(frame_bytes, target_description)
+                    self._broadcast_ai_activity("search_detect")
+                except RateLimitError:
+                    logger.warning("Still rate limited — skipping position %d", position + 1)
                     continue
 
-                logger.info(
-                    "Search position %d: visible=%s conf=%.2f size=%.3f",
-                    position + 1, perception.target_visible,
-                    perception.confidence, perception.relative_size,
+            logger.info(
+                "Search position %d/%d: visible=%s conf=%.2f",
+                position + 1, total, response.target_visible, response.confidence,
+            )
+
+            if (
+                response.target_visible
+                and response.confidence >= cfg.SEARCH_MIN_CONFIDENCE
+            ):
+                self._send_text_sync(
+                    f"Target spotted at position {position + 1}! Starting approach."
                 )
+                logger.info("Target found at search position %d", position + 1)
+                # Capture acquisition frame for report
+                acq = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
+                if acq:
+                    self._report.acquisition_frame = acq
+                    logger.info("Report: saved acquisition frame (%d bytes)", len(acq))
+                return True
 
-                if (
-                    perception.target_visible
-                    and perception.confidence >= cfg.SEARCH_MIN_CONFIDENCE
-                ):
-                    self._send_text_sync(
-                        f"Target spotted at position {position + 1}! "
-                        f"Confidence: {perception.confidence:.0%}. Starting approach."
-                    )
-                    logger.info("Target found at search position %d", position + 1)
-                    return True
+            # Narrate + pause for Live API to speak naturally
+            self._send_text_sync(
+                f"Scanning position {position + 1} of {total}... "
+                f"no target visible here."
+            )
+            self._interruptible_sleep(cfg.SEARCH_POST_DETECT_DELAY)
 
-            # Full sweep complete, not found
-            logger.warning("Target not found after full 360-degree scan")
-            return False
-
-        finally:
-            self._perception.deactivate()
-            if self._streamer:
-                self._streamer.resume_perception_stream()
+        # Full sweep complete, not found
+        logger.warning("Target not found after full 360-degree scan")
+        return False
 
     # ------------------------------------------------------------------
     # Phase 2: Perception-guided approach
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _is_stale(
-        current: ReportPerceptionParams,
-        previous: ReportPerceptionParams | None,
-    ) -> bool:
-        """Detect stale data — identical values from consecutive perceptions."""
-        if previous is None:
-            return False
-        return (
-            abs(current.horizontal_offset - previous.horizontal_offset) < 0.01
-            and abs(current.vertical_offset - previous.vertical_offset) < 0.01
-            and abs(current.relative_size - previous.relative_size) < 0.01
-            and current.confidence == previous.confidence
-        )
 
     def _search_recovery(
         self,
@@ -435,311 +551,371 @@ class InspectionMission:
     ) -> bool:
         """3-step search recovery: CCW → CW → CCW (net heading change = 0).
 
+        Uses Flash API (visual_client.detect) instead of Live API perception.
         Returns True if target re-acquired during recovery.
         """
         deg = cfg.INSPECTION_SEARCH_RECOVERY_DEG
 
         # Step 1: Rotate CCW
         logger.info("Search recovery step 1: CCW %d°", deg)
-        self._controller.rotate("counter_clockwise", deg, delay_override=0.0)
+        self._controller.rotate("counter_clockwise", deg)
         self._log_command(f"Rotate CCW {deg}° (search recovery step 1)")
-        time.sleep(cfg.APPROACH_ROTATE_DELAY)
-        self._send_fresh_frame_sync(
-            target_description, debug_label=f"approach_recovery1_step{step}",
+        self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
+        frame_bytes = self._streamer.get_fresh_perception_frame_bytes(
+            timeout=3.0, min_new_frames=30,
         )
-        perception = self._perception.wait_for_perception(timeout=5.0)
-        if perception and perception.target_visible and perception.confidence >= 0.3:
-            logger.info("Search recovery: target re-acquired after CCW")
-            return True
+        if frame_bytes:
+            self._save_debug_frame(frame_bytes, f"approach_recovery1_step{step}")
+            try:
+                response = self._visual_client.detect(frame_bytes, target_description)
+            except RateLimitError:
+                logger.warning("Rate limited during search recovery step 1")
+                response = PerceptionResponse(target_visible=False, confidence=0.0)
+            if response.target_visible and response.confidence >= 0.3:
+                logger.info("Search recovery: target re-acquired after CCW")
+                return True
 
         # Step 2: Rotate CW (double, to go past original heading)
         logger.info("Search recovery step 2: CW %d°", deg * 2)
-        self._controller.rotate("clockwise", deg * 2, delay_override=0.0)
+        self._controller.rotate("clockwise", deg * 2)
         self._log_command(f"Rotate CW {deg * 2}° (search recovery step 2)")
-        time.sleep(cfg.APPROACH_ROTATE_DELAY)
-        self._send_fresh_frame_sync(
-            target_description, debug_label=f"approach_recovery2_step{step}",
+        self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
+        frame_bytes = self._streamer.get_fresh_perception_frame_bytes(
+            timeout=3.0, min_new_frames=30,
         )
-        perception = self._perception.wait_for_perception(timeout=5.0)
-        if perception and perception.target_visible and perception.confidence >= 0.3:
-            logger.info("Search recovery: target re-acquired after CW")
-            return True
+        if frame_bytes:
+            self._save_debug_frame(frame_bytes, f"approach_recovery2_step{step}")
+            try:
+                response = self._visual_client.detect(frame_bytes, target_description)
+            except RateLimitError:
+                logger.warning("Rate limited during search recovery step 2")
+                response = PerceptionResponse(target_visible=False, confidence=0.0)
+            if response.target_visible and response.confidence >= 0.3:
+                logger.info("Search recovery: target re-acquired after CW")
+                return True
 
         # Step 3: Restore original heading (CCW back)
         logger.info("Search recovery step 3: CCW %d° (restore heading)", deg)
-        self._controller.rotate("counter_clockwise", deg, delay_override=0.0)
+        self._controller.rotate("counter_clockwise", deg)
         self._log_command(f"Rotate CCW {deg}° (search recovery step 3, restore heading)")
-        time.sleep(cfg.APPROACH_ROTATE_DELAY)
+        self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
         logger.warning("Search recovery: target NOT re-acquired")
         return False
 
     def _run_approach_phase(self, target_description: str) -> None:
-        """Approach the target using perception feedback from Gemini.
+        """Approach the target using bounding box perception via generate_content.
 
-        Uses EMA smoothing, stale-data rejection with self-correcting recovery,
-        size-adaptive forward distance, centering gate, and stagnation detection.
+        Uses VisualPerceptionClient for accurate box_2d detection, with EMA
+        smoothing, size-adaptive forward distance, centering gate, and
+        stagnation detection.
         """
+        from client.src.perception.visual import compute_offsets
+
         cfg = self._config
-        self._perception.activate()
-        if self._streamer:
-            self._streamer.pause_perception_stream()
 
-        try:
-            # Send fresh frame + nudge to start perception
-            self._send_fresh_frame_sync(target_description, debug_label="approach_start")
+        # EMA smoothing state
+        smoothed_size: float | None = None
+        smoothed_h_off: float | None = None
+        smoothed_v_off: float | None = None
+        alpha = 0.5
 
-            consecutive_blind = 0
-            watchdog_start = time.monotonic()
+        # Stagnation detection
+        last_forward_size: float | None = None
+        consecutive_no_growth = 0
+        forward_step_count = 0
+        not_visible_count = 0
+        watchdog_start = time.monotonic()
 
-            # Stale detection state
-            last_raw_perception: ReportPerceptionParams | None = None
-            consecutive_stale = 0
-            stale_recovery_offset = 0  # Track cumulative heading drift
+        # Supplementary rotation tracking
+        consecutive_strafe_no_improvement: int = 0
+        prev_h_magnitude: float | None = None
 
-            # EMA smoothing state
-            smoothed_size: float | None = None
-            smoothed_h_off: float | None = None
-            smoothed_v_off: float | None = None
-            alpha = 0.5
+        # Command failure tolerance (lesson J1: COMMAND errors → retry, not abort)
+        consecutive_cmd_failures = 0
 
-            # Stagnation detection
-            last_forward_size: float | None = None
-            consecutive_no_growth = 0
+        # Perception caching — skip detect() if drone didn't move
+        moved_this_step = True
+        prev_response = None
+        recovery_attempts = 0
 
-            for step in range(cfg.INSPECTION_MAX_APPROACH_STEPS):
-                self._check_abort()
+        for step in range(cfg.INSPECTION_MAX_APPROACH_STEPS):
+            self._check_abort()
 
-                # Watchdog: abort approach if total time exceeded
-                elapsed = time.monotonic() - watchdog_start
-                if elapsed >= cfg.INSPECTION_APPROACH_WATCHDOG_S:
-                    logger.warning(
-                        "Approach watchdog timeout (%.0fs). "
-                        "Proceeding to inspection at current distance.",
-                        elapsed,
-                    )
-                    break
-
-                # Wait for perception
-                perception = self._perception.wait_for_perception(
-                    timeout=cfg.INSPECTION_PERCEPTION_TIMEOUT,
+            # Watchdog: abort approach if total time exceeded
+            elapsed = time.monotonic() - watchdog_start
+            if elapsed >= cfg.INSPECTION_APPROACH_WATCHDOG_S:
+                logger.warning(
+                    "Approach watchdog timeout (%.0fs). "
+                    "Proceeding to inspection at current distance.",
+                    elapsed,
                 )
+                break
 
-                if perception is None:
-                    # Nudge Gemini with a fresh frame and retry once
-                    logger.info("No perception received — nudging Gemini (step %d)", step)
-                    self._send_fresh_frame_sync(
-                        target_description, debug_label=f"approach_blind_step{step}",
-                    )
-                    perception = self._perception.wait_for_perception(timeout=5.0)
+            # Get fresh frame and run visual perception
+            frame_bytes = self._streamer.get_fresh_perception_frame_bytes(
+                timeout=3.0, min_new_frames=10,
+            )
+            if not frame_bytes:
+                logger.warning("No fresh frame available at step %d", step)
+                self._interruptible_sleep(1.0)
+                continue
 
-                if perception is None:
-                    consecutive_blind += 1
-                    logger.warning(
-                        "Perception timeout (consecutive_blind=%d/%d)",
-                        consecutive_blind, cfg.INSPECTION_MAX_BLIND_STEPS,
+            self._save_debug_frame(frame_bytes, f"approach_step{step}")
+
+            if not moved_this_step and prev_response is not None and prev_response.target_visible:
+                response = prev_response
+                logger.info("No movement last step — reusing cached perception")
+            else:
+                try:
+                    response = self._visual_client.detect(frame_bytes, target_description)
+                    self._broadcast_ai_activity("approach_detect")
+                except RateLimitError:
+                    logger.warning("Rate limited during approach, treating as not visible")
+                    response = PerceptionResponse(target_visible=False, confidence=0.0)
+                prev_response = response
+            moved_this_step = False  # Reset for this iteration
+
+            logger.info(
+                "Approach step %d: visible=%s conf=%.2f box=%s path_clear=%s",
+                step, response.target_visible, response.confidence,
+                response.box_2d, response.path_clear,
+            )
+
+            # Target not visible or low confidence
+            if not response.target_visible or response.confidence < 0.3:
+                self._broadcast_approach_perception(response, 0.0, 0.0, 0.0)
+                not_visible_count += 1
+                if not_visible_count >= cfg.INSPECTION_MAX_BLIND_STEPS:
+                    logger.info(
+                        "Target not visible %d consecutive — search recovery",
+                        not_visible_count,
                     )
-                    if consecutive_blind >= cfg.INSPECTION_MAX_BLIND_STEPS:
+                    self._send_text_sync(
+                        "Lost sight of target, searching nearby."
+                    )
+                    recovery_attempts += 1
+                    if recovery_attempts > cfg.INSPECTION_MAX_RECOVERY_ATTEMPTS:
                         logger.warning(
-                            "Max blind steps reached. "
-                            "Proceeding to inspection at current distance.",
+                            "Recovery attempt %d exceeds limit — falling back to full search",
+                            recovery_attempts,
                         )
-                        break
-                    continue  # Do NOT move — just try next step
-
-                consecutive_blind = 0
-
-                logger.info(
-                    "Approach step %d: visible=%s h=%.2f v=%.2f size=%.3f conf=%.2f",
-                    step, perception.target_visible,
-                    perception.horizontal_offset, perception.vertical_offset,
-                    perception.relative_size, perception.confidence,
-                )
-
-                # Target not visible or low confidence — 3-step search recovery
-                if not perception.target_visible or perception.confidence < 0.3:
-                    logger.info("Target not visible/low confidence — search recovery")
-                    self._search_recovery(target_description, step, cfg)
-                    continue
-
-                # --- Stale data rejection ---
-                if self._is_stale(perception, last_raw_perception):
-                    consecutive_stale += 1
-                    logger.warning("Stale perception (%d consecutive)", consecutive_stale)
-                    if consecutive_stale >= 2:
-                        # Alternate direction to bound heading drift
-                        direction = (
-                            "clockwise" if stale_recovery_offset <= 0
-                            else "counter_clockwise"
+                        self._send_text_sync(
+                            "Multiple recovery attempts failed. Running full 360-degree search."
                         )
-                        self._controller.rotate(direction, 10, delay_override=0.0)
-                        dir_label = "CW" if direction == "clockwise" else "CCW"
-                        self._log_command(f"Rotate {dir_label} 10° (stale data recovery)")
-                        stale_recovery_offset += 10 if direction == "clockwise" else -10
-                        time.sleep(cfg.APPROACH_ROTATE_DELAY)
-                        consecutive_stale = 0
-                    self._send_fresh_frame_sync(
-                        target_description, debug_label=f"approach_stale_step{step}",
-                    )
-                    continue  # Don't move forward on stale data
-
-                # --- Fresh data — reset stale state and undo heading drift ---
-                consecutive_stale = 0
-                last_raw_perception = perception
-
-                if stale_recovery_offset != 0:
-                    undo_dir = (
-                        "counter_clockwise" if stale_recovery_offset > 0
-                        else "clockwise"
-                    )
-                    undo_deg = abs(stale_recovery_offset)
-                    self._controller.rotate(
-                        undo_dir, undo_deg, delay_override=0.0,
-                    )
-                    undo_label = "CCW" if undo_dir == "counter_clockwise" else "CW"
-                    self._log_command(f"Rotate {undo_label} {undo_deg}° (undo stale drift)")
-                    stale_recovery_offset = 0
-                    time.sleep(cfg.APPROACH_ROTATE_DELAY)
-
-                # --- EMA smoothing (all three axes, fresh data only) ---
-                if smoothed_size is None:
-                    smoothed_size = perception.relative_size
-                    smoothed_h_off = perception.horizontal_offset
-                    smoothed_v_off = perception.vertical_offset
-                else:
-                    smoothed_size = (
-                        alpha * perception.relative_size + (1 - alpha) * smoothed_size
-                    )
-                    smoothed_h_off = (
-                        alpha * perception.horizontal_offset + (1 - alpha) * smoothed_h_off
-                    )
-                    smoothed_v_off = (
-                        alpha * perception.vertical_offset + (1 - alpha) * smoothed_v_off
-                    )
-
-                logger.info(
-                    "EMA: size=%.3f h=%.2f v=%.2f",
-                    smoothed_size, smoothed_h_off, smoothed_v_off,
-                )
-
-                # --- Centering gate: strafe (close) or rotate (far) before moving forward ---
-                if abs(smoothed_h_off) > cfg.INSPECTION_H_DEADBAND:
-                    strafe_zone = (
-                        smoothed_size is not None
-                        and smoothed_size >= cfg.INSPECTION_STRAFE_ZONE_THRESHOLD
-                    )
-                    if strafe_zone:
-                        # Close zone: lateral strafe (no heading change)
-                        strafe_cm = int(abs(smoothed_h_off) * cfg.INSPECTION_KP_LATERAL)
-                        strafe_cm = max(
-                            cfg.INSPECTION_MIN_STRAFE,
-                            min(strafe_cm, cfg.INSPECTION_MAX_STRAFE),
-                        )
-                        direction = "right" if smoothed_h_off > 0 else "left"
-                        logger.info(
-                            "Strafe centering: %s %dcm (smoothed_h=%.2f, size=%.3f)",
-                            direction, strafe_cm, smoothed_h_off, smoothed_size,
-                        )
-                        self._controller.move(direction, strafe_cm, delay_override=0.0)
-                        self._log_command(
-                            f"Strafe {direction} {strafe_cm}cm "
-                            f"(centering, h={smoothed_h_off:.2f})"
-                        )
-                        time.sleep(cfg.APPROACH_MOVE_DELAY)
-                        self._send_fresh_frame_sync(
-                            target_description, debug_label=f"approach_strafe_step{step}",
-                        )
-                        continue
+                        if self._run_search_phase(target_description):
+                            recovery_attempts = 0
+                            smoothed_size = None
+                            smoothed_h_off = None
+                            smoothed_v_off = None
+                            last_forward_size = None
+                            consecutive_no_growth = 0
+                            forward_step_count = 0
+                            prev_h_magnitude = None
+                            consecutive_strafe_no_improvement = 0
+                        else:
+                            logger.warning("Full search failed — proceeding to inspection")
+                            break
                     else:
-                        # Far zone: rotation centering
-                        rotate_deg = int(abs(smoothed_h_off) * cfg.INSPECTION_ROTATION_GAIN)
-                        rotate_deg = max(cfg.MIN_ROTATION, min(rotate_deg, 45))
-                        direction = (
+                        self._search_recovery(target_description, step, cfg)
+                    prev_response = None
+                    moved_this_step = True
+                    not_visible_count = 0
+                continue
+
+            not_visible_count = 0
+
+            # No bounding box despite visible — treat as blind
+            if not response.box_2d or len(response.box_2d) != 4:
+                logger.warning("Target visible but no box_2d — skipping step")
+                continue
+
+            # Compute offsets from bounding box
+            h_off, v_off, rel_size = compute_offsets(response.box_2d)
+
+            logger.info(
+                "Box offsets: h=%.3f v=%.3f size=%.3f (box=%s)",
+                h_off, v_off, rel_size, response.box_2d,
+            )
+
+            # --- EMA smoothing ---
+            if smoothed_size is None:
+                smoothed_size = rel_size
+                smoothed_h_off = h_off
+                smoothed_v_off = v_off
+            else:
+                smoothed_size = alpha * rel_size + (1 - alpha) * smoothed_size
+                smoothed_h_off = alpha * h_off + (1 - alpha) * smoothed_h_off
+                smoothed_v_off = alpha * v_off + (1 - alpha) * smoothed_v_off
+
+            logger.info(
+                "EMA: size=%.3f h=%.2f v=%.2f",
+                smoothed_size, smoothed_h_off, smoothed_v_off,
+            )
+
+            # Broadcast perception to dashboard overlay
+            self._broadcast_approach_perception(response, h_off, v_off, rel_size)
+
+            # --- Compute-then-execute ---
+
+            # 3A: Compute horizontal correction (strafe-first)
+            h_cmd: tuple[str, str, int] | None = None
+            if abs(smoothed_h_off) > cfg.INSPECTION_H_DEADBAND:
+                strafe_cm = int(abs(smoothed_h_off) * cfg.INSPECTION_KP_LATERAL)
+                if strafe_cm >= cfg.INSPECTION_SKIP_LATERAL_CM:
+                    strafe_cm = max(
+                        cfg.INSPECTION_MIN_STRAFE,
+                        min(strafe_cm, cfg.INSPECTION_MAX_STRAFE),
+                    )
+                    direction = "right" if smoothed_h_off > 0 else "left"
+                    h_cmd = ("strafe", direction, strafe_cm)
+
+                    # Track strafe improvement for supplementary rotation
+                    cur_h_mag = abs(smoothed_h_off)
+                    if prev_h_magnitude is not None and cur_h_mag >= prev_h_magnitude:
+                        consecutive_strafe_no_improvement += 1
+                    else:
+                        consecutive_strafe_no_improvement = 0
+                    prev_h_magnitude = cur_h_mag
+
+                    # Supplementary rotation if strafes aren't helping
+                    if (
+                        consecutive_strafe_no_improvement >= 3
+                        and abs(smoothed_h_off) >= 0.20
+                    ):
+                        raw = int(abs(smoothed_h_off) * cfg.INSPECTION_ROTATION_GAIN)
+                        rotate_deg = max(cfg.MIN_ROTATION, min(15, raw))
+                        rot_dir = (
                             "clockwise" if smoothed_h_off > 0
                             else "counter_clockwise"
                         )
+                        h_cmd = ("rotate", rot_dir, rotate_deg)
+                        consecutive_strafe_no_improvement = 0
                         logger.info(
-                            "Rotation centering: %s %d° (smoothed_h=%.2f)",
-                            direction, rotate_deg, smoothed_h_off,
+                            "Supplementary rotation: %s %d° (strafe not improving)",
+                            rot_dir, rotate_deg,
                         )
-                        self._controller.rotate(direction, rotate_deg, delay_override=0.0)
-                        dir_label = "CW" if direction == "clockwise" else "CCW"
-                        self._log_command(
-                            f"Rotate {dir_label} {rotate_deg}° "
-                            f"(centering, h={smoothed_h_off:.2f})"
-                        )
-                        time.sleep(cfg.APPROACH_ROTATE_DELAY)
-                        self._send_fresh_frame_sync(
-                            target_description, debug_label=f"approach_rotate_step{step}",
-                        )
-                        continue
-
-                # --- Vertical correction ---
-                if smoothed_v_off is not None and abs(smoothed_v_off) > cfg.INSPECTION_V_DEADBAND:
-                    vert_cm = int(abs(smoothed_v_off) * cfg.INSPECTION_KP_VERTICAL)
-                    if vert_cm >= cfg.INSPECTION_SKIP_VERTICAL_CM:
-                        vert_cm = max(
-                            cfg.INSPECTION_MIN_VERTICAL,
-                            min(vert_cm, cfg.INSPECTION_MAX_VERTICAL),
-                        )
-                        # v_offset > 0 means target is low in frame → move down
-                        vert_dir = "down" if smoothed_v_off > 0 else "up"
-                        logger.info(
-                            "Vertical correction: %s %dcm (smoothed_v=%.2f)",
-                            vert_dir, vert_cm, smoothed_v_off,
-                        )
-                        self._controller.move(vert_dir, vert_cm, delay_override=0.0)
-                        self._log_command(
-                            f"Move {vert_dir} {vert_cm}cm "
-                            f"(vertical, v={smoothed_v_off:.2f})"
-                        )
-                        time.sleep(cfg.APPROACH_MOVE_DELAY)
-                        self._send_fresh_frame_sync(
-                            target_description, debug_label=f"approach_vert_step{step}",
-                        )
-                        continue
-
-                # --- Close enough? (raw reading OR smoothed) ---
-                if (
-                    perception.relative_size >= cfg.INSPECTION_APPROACH_SIZE_THRESHOLD
-                    and perception.confidence >= 0.7
-                ):
-                    logger.info(
-                        "Target close enough (raw_size=%.3f >= %.3f, conf=%.2f)",
-                        perception.relative_size,
-                        cfg.INSPECTION_APPROACH_SIZE_THRESHOLD,
-                        perception.confidence,
+                else:
+                    logger.debug(
+                        "Skipping tiny strafe: %.0fcm < %.0f threshold",
+                        strafe_cm, cfg.INSPECTION_SKIP_LATERAL_CM,
                     )
-                    break
-                if smoothed_size >= cfg.INSPECTION_APPROACH_SIZE_THRESHOLD:
-                    logger.info(
-                        "Target close enough (smoothed_size=%.3f >= %.3f)",
-                        smoothed_size, cfg.INSPECTION_APPROACH_SIZE_THRESHOLD,
-                    )
-                    break
 
-                # --- Size-adaptive forward distance ---
-                if smoothed_size < 0.10:
+            # 3B: Compute vertical correction
+            v_cmd: tuple[str, int] | None = None
+            if smoothed_v_off is not None and abs(smoothed_v_off) > cfg.INSPECTION_V_DEADBAND:
+                vert_cm = int(abs(smoothed_v_off) * cfg.INSPECTION_KP_VERTICAL)
+                if vert_cm >= cfg.INSPECTION_SKIP_VERTICAL_CM:
+                    vert_cm = max(
+                        cfg.INSPECTION_MIN_VERTICAL,
+                        min(vert_cm, cfg.INSPECTION_MAX_VERTICAL),
+                    )
+                    vert_dir = "up" if smoothed_v_off > 0 else "down"
+                    v_cmd = (vert_dir, vert_cm)
+                else:
+                    logger.debug(
+                        "Skipping tiny vertical: %dcm < %d threshold",
+                        vert_cm, cfg.INSPECTION_SKIP_VERTICAL_CM,
+                    )
+
+            # 3C: Compute forward distance (gated by centering + path_clear)
+            forward_cm = 0
+            if abs(smoothed_h_off) < cfg.INSPECTION_CENTERING_THRESHOLD:
+                if smoothed_size < 0.15:
                     forward_cm = cfg.INSPECTION_FORWARD_FAR
-                elif smoothed_size < 0.15:
+                elif smoothed_size < 0.25:
                     forward_cm = cfg.INSPECTION_FORWARD_MEDIUM
                 else:
                     forward_cm = cfg.INSPECTION_FORWARD_CLOSE
 
+            # 3D: Exit check (before executing)
+            if (
+                forward_step_count >= cfg.INSPECTION_MIN_FORWARD_STEPS
+                and smoothed_size >= cfg.INSPECTION_APPROACH_SIZE_THRESHOLD
+            ):
                 logger.info(
-                    "Moving forward %dcm (smoothed_size=%.3f)", forward_cm, smoothed_size,
+                    "Target close enough (smoothed_size=%.3f >= %.3f, "
+                    "forward_steps=%d)",
+                    smoothed_size, cfg.INSPECTION_APPROACH_SIZE_THRESHOLD,
+                    forward_step_count,
                 )
-                result = self._controller.move("forward", forward_cm, delay_override=0.0)
+                self._send_text_sync(
+                    "Target centered and close enough, starting inspection."
+                )
+                break
+
+            # 3E: Execute all non-zero corrections sequentially
+            moves_done: list[str] = []
+
+            if h_cmd is not None:
+                h_type, h_dir, h_amount = h_cmd
+                if h_type == "strafe":
+                    logger.info(
+                        "Strafe centering: %s %dcm (smoothed_h=%.2f, size=%.3f)",
+                        h_dir, h_amount, smoothed_h_off, smoothed_size,
+                    )
+                    self._controller.move(h_dir, h_amount)
+                    self._log_command(
+                        f"Strafe {h_dir} {h_amount}cm "
+                        f"(centering, h={smoothed_h_off:.2f})"
+                    )
+                    self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
+                    moves_done.append(f"strafed {h_dir} {h_amount}cm")
+                else:
+                    dir_label = "CW" if h_dir == "clockwise" else "CCW"
+                    logger.info(
+                        "Rotation centering: %s %d° (smoothed_h=%.2f)",
+                        h_dir, h_amount, smoothed_h_off,
+                    )
+                    self._controller.rotate(h_dir, h_amount)
+                    self._log_command(
+                        f"Rotate {dir_label} {h_amount}° "
+                        f"(centering, h={smoothed_h_off:.2f})"
+                    )
+                    self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
+                    moves_done.append(f"rotated {dir_label} {h_amount}°")
+
+            if v_cmd is not None:
+                v_dir, v_amount = v_cmd
+                logger.info(
+                    "Vertical correction: %s %dcm (smoothed_v=%.2f)",
+                    v_dir, v_amount, smoothed_v_off,
+                )
+                self._controller.move(v_dir, v_amount)
+                self._log_command(
+                    f"Move {v_dir} {v_amount}cm "
+                    f"(vertical, v={smoothed_v_off:.2f})"
+                )
+                self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
+                moves_done.append(f"moved {v_dir} {v_amount}cm")
+
+            if forward_cm > 0:
+                logger.info(
+                    "Moving forward %dcm (smoothed_size=%.3f)",
+                    forward_cm, smoothed_size,
+                )
+                result = self._controller.move("forward", forward_cm)
                 self._log_command(
                     f"Forward {forward_cm}cm (size: {smoothed_size:.3f})"
                 )
                 if not result.get("success"):
-                    logger.error("Forward move failed: %s", result)
-                    raise RuntimeError(
-                        f"Movement failed: {result.get('message', 'unknown')}",
+                    if not self._controller.state.is_flying:
+                        raise RuntimeError("Drone auto-landed during approach")
+                    consecutive_cmd_failures += 1
+                    logger.warning(
+                        "Forward move failed (%d/3): %s",
+                        consecutive_cmd_failures, result,
                     )
-                time.sleep(cfg.APPROACH_MOVE_DELAY)
+                    if consecutive_cmd_failures >= 3:
+                        raise RuntimeError(
+                            "3 consecutive command failures — aborting approach"
+                        )
+                    continue  # Don't count step (lesson F5)
+                consecutive_cmd_failures = 0
+                forward_step_count += 1
+                self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
+                moves_done.append(f"moved forward {forward_cm}cm")
 
-                # --- Stagnation detection ---
+                # Stagnation detection (only on forward steps)
                 if last_forward_size is not None and smoothed_size is not None:
                     growth = smoothed_size - last_forward_size
                     if growth < cfg.INSPECTION_STAGNATION_THRESHOLD:
@@ -755,7 +931,8 @@ class InspectionMission:
                                 "Proceeding to inspection."
                             )
                             self._send_text_sync(
-                                "Target size is not growing — this is as close as we can get. "
+                                "Target size is not growing — this is as close "
+                                "as we can get. "
                                 "Proceeding to inspection at current distance."
                             )
                             break
@@ -763,163 +940,231 @@ class InspectionMission:
                         consecutive_no_growth = 0
                 last_forward_size = smoothed_size
 
-                # --- Post-movement: send fresh frame + nudge ---
-                self._send_fresh_frame_sync(
-                    target_description, debug_label=f"approach_fwd_step{step}",
-                )
+            moved_this_step = bool(moves_done)
 
-            else:
+            if not moves_done:
                 logger.info(
-                    "Max approach steps (%d) reached. Proceeding to inspection.",
-                    cfg.INSPECTION_MAX_APPROACH_STEPS,
+                    "No movement this step (h=%.2f, fwd=%d)",
+                    smoothed_h_off, forward_cm,
                 )
 
-            # Store final size for post-inspection move clamping
-            if self._mission and smoothed_size is not None:
-                self._mission.final_relative_size = smoothed_size
+            # Narrate progress periodically
+            if moves_done and step % cfg.INSPECTION_NARRATION_INTERVAL == 0:
+                # Build size description
+                if smoothed_size < 0.10:
+                    size_desc = "still far out"
+                elif smoothed_size < 0.15:
+                    size_desc = "getting closer"
+                elif smoothed_size < 0.20:
+                    size_desc = "fairly close"
+                else:
+                    size_desc = "nearly in position"
 
-        finally:
-            self._perception.deactivate()
-            if self._streamer:
-                self._streamer.resume_perception_stream()
+                # Build move descriptions
+                move_descs = []
+                for m in moves_done:
+                    if "forward" in m:
+                        move_descs.append("moving closer")
+                    elif "right" in m.lower():
+                        move_descs.append("adjusting right")
+                    elif "left" in m.lower():
+                        move_descs.append("adjusting left")
+                    elif "up" in m:
+                        move_descs.append("adjusting up")
+                    elif "down" in m:
+                        move_descs.append("adjusting down")
+
+                narration = f"Step {step + 1}: {', '.join(move_descs)}. Target {size_desc}."
+                self._send_text_sync(narration)
+
+            # Minimum 1s per step — prevents tight loops on cached/zero-movement steps
+            self._interruptible_sleep(1.0)
+
+        else:
+            logger.info(
+                "Max approach steps (%d) reached. Proceeding to inspection.",
+                cfg.INSPECTION_MAX_APPROACH_STEPS,
+            )
+
+        # Store final size for post-inspection move clamping
+        if self._mission and smoothed_size is not None:
+            self._mission.final_relative_size = smoothed_size
 
     # ------------------------------------------------------------------
-    # Phase 3: Orbit arc inspection
+    # Final centering (between approach and inspection)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _compute_orbit_arc(
-        radius: int, angle_deg: int, side: str,
-    ) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
-        """Compute curve_xyz_speed midpoint and endpoint for an orbit arc.
+    def _final_centering(self, target_description: str) -> None:
+        """Tight centering adjustments after approach, before orbit inspection.
 
-        The drone orbits around a target at distance *radius*.
-        Circle centered at (radius, 0) — the target is at (radius, 0) in drone-local coords.
-        At angle θ from origin: position = (R - R*cos(θ), ±R*sin(θ), 0).
-
-        Args:
-            radius: orbit radius in cm.
-            angle_deg: arc angle in degrees.
-            side: "right" (negative y = rightward in Tello frame) or "left" (positive y).
-
-        Returns:
-            ((mid_x, mid_y, mid_z), (end_x, end_y, end_z)) — integer cm values.
+        Only lateral and vertical corrections — no forward movement.
         """
-        half = math.radians(angle_deg / 2)
-        full = math.radians(angle_deg)
+        cfg = self._config
+        max_steps = cfg.INSPECTION_FINAL_CENTERING_MAX_STEPS
+        logger.info("Starting final centering (max %d steps)", max_steps)
 
-        mid_x = round(radius * (1 - math.cos(half)))
-        mid_y = round(radius * math.sin(half))
-        end_x = round(radius * (1 - math.cos(full)))
-        end_y = round(radius * math.sin(full))
+        from client.src.perception.visual import compute_offsets
 
-        # Right orbit = negative y (rightward in Tello frame)
-        if side == "right":
-            mid_y = -mid_y
-            end_y = -end_y
+        for i in range(max_steps):
+            self._check_abort()
 
-        return (mid_x, mid_y, 0), (end_x, end_y, 0)
+            frame_bytes = self._streamer.get_fresh_perception_frame_bytes(
+                timeout=3.0, min_new_frames=10,
+            )
+            if not frame_bytes:
+                logger.warning("No frame for final centering step %d", i)
+                break
+
+            try:
+                response = self._visual_client.detect(frame_bytes, target_description)
+                self._broadcast_ai_activity("centering_detect")
+            except RateLimitError:
+                logger.warning("Rate limited during final centering, treating as not visible")
+                break
+            if not response.target_visible or not response.box_2d or len(response.box_2d) != 4:
+                logger.info("Target not visible during final centering — done")
+                break
+
+            h_off, v_off, rel_size = compute_offsets(response.box_2d)
+            self._broadcast_approach_perception(response, h_off, v_off, rel_size)
+            needs_correction = False
+
+            try:
+                if abs(h_off) > cfg.INSPECTION_FINAL_CENTERING_H:
+                    strafe_cm = int(abs(h_off) * cfg.INSPECTION_KP_LATERAL)
+                    if strafe_cm >= cfg.INSPECTION_MIN_STRAFE:
+                        # Large offset -> strafe
+                        strafe_cm = min(strafe_cm, cfg.INSPECTION_MAX_STRAFE)
+                        direction = "right" if h_off > 0 else "left"
+                        logger.info(
+                            "Final centering: strafe %s %dcm (h=%.3f)",
+                            direction, strafe_cm, h_off,
+                        )
+                        self._controller.move(direction, strafe_cm)
+                        self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
+                    else:
+                        # Small offset -> rotation (finer than min strafe)
+                        rot_deg = int(abs(h_off) * cfg.INSPECTION_FINAL_CENTERING_ROTATION_GAIN)
+                        rot_deg = max(
+                            cfg.MIN_ROTATION,
+                            min(rot_deg, cfg.INSPECTION_FINAL_CENTERING_MAX_ROTATION),
+                        )
+                        rot_dir = "clockwise" if h_off > 0 else "counter_clockwise"
+                        self._controller.rotate(rot_dir, rot_deg)
+                        cw_label = "CW" if h_off > 0 else "CCW"
+                        self._log_command(
+                            f"Rotate {cw_label} {rot_deg}\u00b0 (fine centering, h={h_off:.3f})"
+                        )
+                        self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
+                    needs_correction = True
+
+                if abs(v_off) > cfg.INSPECTION_FINAL_CENTERING_V:
+                    vert_cm = int(abs(v_off) * cfg.INSPECTION_KP_VERTICAL)
+                    vert_cm = max(
+                        cfg.INSPECTION_MIN_VERTICAL,
+                        min(vert_cm, cfg.INSPECTION_MAX_VERTICAL),
+                    )
+                    vert_dir = "up" if v_off > 0 else "down"
+                    logger.info(
+                        "Final centering: %s %dcm (v=%.3f)",
+                        vert_dir, vert_cm, v_off,
+                    )
+                    self._controller.move(vert_dir, vert_cm)
+                    self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
+                    needs_correction = True
+            except Exception:
+                logger.warning(
+                    "Final centering move failed at step %d",
+                    i, exc_info=True,
+                )
+                if not self._controller.state.is_flying:
+                    raise RuntimeError("Drone auto-landed during final centering")
+                break
+
+            if not needs_correction:
+                logger.info("Final centering converged at step %d", i)
+                break
+
+        self._send_text_sync("Final centering complete.")
+        logger.info("Final centering done")
+
+    # ------------------------------------------------------------------
+    # Phase 3: Strafe + rotation inspection
+    # ------------------------------------------------------------------
 
     def _run_inspection_phase(
         self, target_description: str, aspects: str | None,
     ) -> None:
-        """Capture frames from 3 perspectives using 45-degree orbit arcs."""
+        """Capture frames from 3 perspectives using lateral strafe + rotation."""
         cfg = self._config
-        radius = cfg.INSPECTION_ORBIT_RADIUS
-        angle = cfg.INSPECTION_ORBIT_ANGLE
-        speed = cfg.INSPECTION_ORBIT_SPEED
+        strafe_dist = cfg.INSPECTION_STRAFE_DISTANCE
+        strafe_rot = cfg.INSPECTION_STRAFE_ROTATION
         stabilize = cfg.INSPECTION_ORBIT_STABILIZE
         captured_frames: list[bytes] = []
         captured_labels: list[str] = []
 
         # 1. Front close-up — capture at current position
         self._check_abort()
-        time.sleep(stabilize)
-        frame = self._streamer.get_fresh_dashboard_frame(timeout=3.0)
+        self._interruptible_sleep(stabilize)
+        frame = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
         if frame is not None:
             captured_frames.append(frame)
             captured_labels.append("front close-up")
+            self._report.inspection_frames.append((frame, "front close-up"))
             logger.info("Captured front close-up (%d bytes)", len(frame))
         else:
             logger.warning("No frame for front close-up")
 
-        # 2. Right orbit arc → rotate to face target → capture
+        # 2. Right angled view: strafe right → rotate to face target → capture → return
         self._check_abort()
-        mid_r, end_r = self._compute_orbit_arc(radius, angle, "right")
-        self._send_text_sync(f"Orbiting {angle}° right for angled view.")
-        logger.info("Right orbit arc: mid=%s end=%s speed=%d", mid_r, end_r, speed)
-        result = self._controller.curve(
-            *mid_r, *end_r, speed, delay_override=0.0,
-        )
-        self._log_command(f"Curve right {angle}° orbit (inspection: right-angled view)")
-        if not result.get("success"):
-            logger.error("Right orbit curve failed: %s", result)
-            raise RuntimeError(f"Right orbit curve failed: {result.get('message', 'unknown')}")
-        # Rotate to face target after arc
-        self._controller.rotate("counter_clockwise", angle, delay_override=0.0)
-        self._log_command(f"Rotate CCW {angle}° (face target after right orbit)")
-        time.sleep(stabilize)
+        self._send_text_sync(f"Strafing right {strafe_dist}cm for angled view.")
+        self._controller.move("right", strafe_dist)
+        self._log_command(f"Move right {strafe_dist}cm (inspection: right-angled view)")
+        self._controller.rotate("counter_clockwise", strafe_rot)
+        self._log_command(f"Rotate CCW {strafe_rot}° (face target)")
+        self._interruptible_sleep(stabilize)
 
-        frame = self._streamer.get_fresh_dashboard_frame(timeout=3.0)
+        frame = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
         if frame is not None:
             captured_frames.append(frame)
             captured_labels.append("right-angled view")
+            self._report.inspection_frames.append((frame, "right-angled view"))
             logger.info("Captured right-angled view (%d bytes)", len(frame))
         else:
             logger.warning("No frame for right-angled view")
 
-        # 3. Return from right orbit to center
+        # Return to center from right
         self._check_abort()
-        self._controller.rotate("clockwise", angle, delay_override=0.0)
-        self._log_command(f"Rotate CW {angle}° (restore heading)")
-        # Reverse curve: from endpoint back to origin
-        rev_mid = (mid_r[0] - end_r[0], mid_r[1] - end_r[1], 0)
-        rev_end = (-end_r[0], -end_r[1], 0)
-        result = self._controller.curve(
-            *rev_mid, *rev_end, speed, delay_override=0.0,
-        )
-        self._log_command("Reverse curve (return to center from right)")
-        if not result.get("success"):
-            logger.warning("Return-from-right curve failed: %s", result)
-        time.sleep(stabilize)
+        self._controller.rotate("clockwise", strafe_rot)
+        self._log_command(f"Rotate CW {strafe_rot}° (restore heading)")
+        self._controller.move("left", strafe_dist)
+        self._log_command(f"Move left {strafe_dist}cm (return to center)")
+        self._interruptible_sleep(stabilize)
 
-        # 4. Left orbit arc → rotate to face target → capture
+        # 3. Left angled view: strafe left → rotate to face target → capture → return
         self._check_abort()
-        mid_l, end_l = self._compute_orbit_arc(radius, angle, "left")
-        self._send_text_sync(f"Orbiting {angle}° left for opposite angled view.")
-        logger.info("Left orbit arc: mid=%s end=%s speed=%d", mid_l, end_l, speed)
-        result = self._controller.curve(
-            *mid_l, *end_l, speed, delay_override=0.0,
-        )
-        self._log_command(f"Curve left {angle}° orbit (inspection: left-angled view)")
-        if not result.get("success"):
-            logger.error("Left orbit curve failed: %s", result)
-            raise RuntimeError(f"Left orbit curve failed: {result.get('message', 'unknown')}")
-        # Rotate to face target after arc
-        self._controller.rotate("clockwise", angle, delay_override=0.0)
-        self._log_command(f"Rotate CW {angle}° (face target after left orbit)")
-        time.sleep(stabilize)
+        self._send_text_sync(f"Strafing left {strafe_dist}cm for opposite angled view.")
+        self._controller.move("left", strafe_dist)
+        self._log_command(f"Move left {strafe_dist}cm (inspection: left-angled view)")
+        self._controller.rotate("clockwise", strafe_rot)
+        self._log_command(f"Rotate CW {strafe_rot}° (face target)")
+        self._interruptible_sleep(stabilize)
 
-        frame = self._streamer.get_fresh_dashboard_frame(timeout=3.0)
+        frame = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
         if frame is not None:
             captured_frames.append(frame)
             captured_labels.append("left-angled view")
+            self._report.inspection_frames.append((frame, "left-angled view"))
             logger.info("Captured left-angled view (%d bytes)", len(frame))
         else:
             logger.warning("No frame for left-angled view")
 
-        # 5. Return from left orbit to center
+        # Return to center from left
         self._check_abort()
-        self._controller.rotate("counter_clockwise", angle, delay_override=0.0)
-        self._log_command(f"Rotate CCW {angle}° (restore heading)")
-        rev_mid = (mid_l[0] - end_l[0], mid_l[1] - end_l[1], 0)
-        rev_end = (-end_l[0], -end_l[1], 0)
-        result = self._controller.curve(
-            *rev_mid, *rev_end, speed, delay_override=0.0,
-        )
-        self._log_command("Reverse curve (return to center from left)")
-        if not result.get("success"):
-            logger.warning("Return-from-left curve failed: %s", result)
+        self._controller.rotate("counter_clockwise", strafe_rot)
+        self._log_command(f"Rotate CCW {strafe_rot}° (restore heading)")
+        self._controller.move("right", strafe_dist)
+        self._log_command(f"Move right {strafe_dist}cm (return to center)")
 
         if not captured_frames:
             logger.error("No frames captured during inspection")
@@ -928,23 +1173,29 @@ class InspectionMission:
             self._notify_status()
             return
 
-        # Send batch frames for comprehensive summary
-        self._send_text_sync(
-            f"Captured {len(captured_frames)} perspectives. Sending for analysis."
-        )
         logger.info(
-            "Inspection capture complete (%d frames: %s). Sending for analysis.",
+            "Inspection capture complete (%d frames: %s). Generating report via Flash.",
             len(captured_frames), ", ".join(captured_labels),
         )
 
         self._check_abort()
 
-        self._send_inspection_frames_sync(
-            captured_frames, captured_labels, target_description, aspects,
-        )
+        # Resume heartbeat before report generation — Flash API can take 10-20s
+        # and the Tello auto-lands after 15s without keepalive.
+        self._controller.executor.resume_heartbeat()
 
-        # Brief wait for Gemini to begin generating the verbal report
-        logger.info("Waiting for Gemini to begin verbal report...")
-        time.sleep(2.0)
+        # Generate structured report via Gemini Flash (cheap text output)
+        if self._visual_client:
+            self._report.inspection_report = self._visual_client.generate_report(
+                captured_frames, captured_labels, target_description, aspects,
+            )
+            self._broadcast_ai_activity("inspection_report")
+            summary = self._report.inspection_report.summary
+        else:
+            summary = "Inspection frames captured but no visual client available."
+            logger.warning("No visual client — skipping report generation")
+
+        # Send brief summary to Live session for verbal announcement
+        self._send_text_sync(f"Inspection complete. {summary}")
 
         logger.info("Inspection phase complete — staying airborne for follow-up")

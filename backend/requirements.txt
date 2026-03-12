@@ -4,6 +4,4 @@ websockets>=14.0
 google-genai>=1.0.0
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
-numpy>=2.0.0
-Pillow>=11.0.0
 python-dotenv>=1.0.0

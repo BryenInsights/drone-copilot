@@ -109,14 +109,22 @@ class FrameStreamer:
         self._last_perception_time = now
         return jpeg_bytes
 
-    def get_fresh_perception_frame(self, timeout: float = 3.0) -> str | None:
+    def get_fresh_perception_frame(
+        self, timeout: float = 3.0, min_new_frames: int = 10,
+    ) -> str | None:
         """Flush stale frames and return a guaranteed-fresh perception frame.
 
         Used after rotation/movement to ensure Gemini sees a post-action frame.
         Bypasses the 1 FPS rate limit and updates _last_perception_time so the
         regular streaming loop doesn't immediately re-send.
+
+        Args:
+            timeout: Max seconds to wait for fresh frames.
+            min_new_frames: Number of frames to skip before accepting one as fresh.
+                At ~30fps, 10 frames = ~333ms — enough to flush stale H264 pipeline
+                frames after rotation/strafe movements.
         """
-        frame = self._capture.flush_and_wait(timeout=timeout)
+        frame = self._capture.flush_and_wait(min_new_frames=min_new_frames, timeout=timeout)
         if frame is None:
             return None
 
@@ -128,9 +136,11 @@ class FrameStreamer:
         self._last_perception_time = time.time()
         return base64.b64encode(jpeg_bytes).decode("ascii")
 
-    def get_fresh_perception_frame_bytes(self, timeout: float = 3.0) -> bytes | None:
+    def get_fresh_perception_frame_bytes(
+        self, timeout: float = 3.0, min_new_frames: int = 10,
+    ) -> bytes | None:
         """Flush stale frames and return fresh perception JPEG as raw bytes."""
-        frame = self._capture.flush_and_wait(timeout=timeout)
+        frame = self._capture.flush_and_wait(min_new_frames=min_new_frames, timeout=timeout)
         if frame is None:
             return None
         resized = self._resize_frame(frame, self._config.PERCEPTION_FRAME_WIDTH)

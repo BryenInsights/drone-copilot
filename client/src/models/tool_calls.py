@@ -1,6 +1,7 @@
 """Tool call parameter Pydantic models for all Gemini Live API tools."""
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -87,5 +88,48 @@ class ReportPerceptionParams(BaseModel):
     @classmethod
     def clamp_positive(cls, v: float) -> float:
         return max(0.0, min(1.0, float(v)))
+
+
+class DashboardPerception(BaseModel):
+    """Unified perception data for dashboard overlay — used by both search and approach."""
+
+    target_visible: bool
+    horizontal_offset: float = Field(ge=-1.0, le=1.0)
+    vertical_offset: float = Field(ge=-1.0, le=1.0)
+    relative_size: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    obstacle_ahead: bool = False
+    box_2d: list[int] | None = None  # [ymin, xmin, ymax, xmax] 0-1000, only from Flash API
+
+    @staticmethod
+    def from_report_perception(params: ReportPerceptionParams) -> "DashboardPerception":
+        """Convert Live API report_perception tool call to dashboard format."""
+        return DashboardPerception(
+            target_visible=params.target_visible,
+            horizontal_offset=params.horizontal_offset,
+            vertical_offset=params.vertical_offset,
+            relative_size=params.relative_size,
+            confidence=params.confidence,
+            obstacle_ahead=False,
+            box_2d=None,
+        )
+
+    @staticmethod
+    def from_visual_perception(
+        response: Any,
+        h_off: float,
+        v_off: float,
+        rel_size: float,
+    ) -> "DashboardPerception":
+        """Convert Flash API detect() result + computed offsets to dashboard format."""
+        return DashboardPerception(
+            target_visible=response.target_visible,
+            horizontal_offset=max(-1.0, min(1.0, h_off)),
+            vertical_offset=max(-1.0, min(1.0, v_off)),
+            relative_size=max(0.0, min(1.0, rel_size)),
+            confidence=response.confidence,
+            obstacle_ahead=not response.path_clear,
+            box_2d=response.box_2d,
+        )
 
 

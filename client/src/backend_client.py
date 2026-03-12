@@ -131,7 +131,11 @@ class BackendClient:
     async def send_frames_with_prompt(
         self, frames_jpeg: list[bytes], prompt: str
     ) -> None:
-        """Send frames with a prompt for Gemini analysis."""
+        """Send frames with a prompt for Gemini analysis.
+
+        NOTE: Currently unused — inspection reports are generated via the Flash
+        API (VisualPerceptionClient). Reserved for future Live API verbal analysis.
+        """
         if not self._connected or self._ws is None:
             return
         frames_b64 = [base64.b64encode(f).decode("ascii") for f in frames_jpeg]

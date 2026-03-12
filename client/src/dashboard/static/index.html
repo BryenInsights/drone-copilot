@@ -3,21 +3,40 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gemi-fly — Autonomous Drone Inspection</title>
-  <link rel="stylesheet" href="/static/style.css?v=2">
+  <title>Drone Copilot — Gemini Live Agent Challenge</title>
+  <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 
 <!-- ── Splash Screen ─────────────────────────────────── -->
 <div class="splash" id="splash">
-  <div class="splash-logo">Gemi-fly</div>
+  <div class="splash-logo">Drone Copilot</div>
 </div>
 
 <!-- ── Header ────────────────────────────────────────── -->
 <header class="header" id="header">
   <div class="header-left">
-    <span class="header-title">Gemi-fly</span>
-    <span class="header-subtitle">Autonomous Drone Inspection System</span>
+    <span class="header-title">Drone Copilot</span>
+    <span class="header-subtitle">Live Agent for Autonomous Drone Inspection</span>
+  </div>
+  <div class="header-timeline" id="timeline">
+    <div class="phase-pill" data-phase="search">
+      <div class="pill-circle" id="step-1">1</div>
+      <span class="pill-label">Search</span>
+      <span class="step-duration" id="dur-1"></span>
+    </div>
+    <div class="pill-connector" id="conn-1-2"><div class="fill"></div></div>
+    <div class="phase-pill" data-phase="approach">
+      <div class="pill-circle" id="step-2">2</div>
+      <span class="pill-label">Approach</span>
+      <span class="step-duration" id="dur-2"></span>
+    </div>
+    <div class="pill-connector" id="conn-2-3"><div class="fill"></div></div>
+    <div class="phase-pill" data-phase="inspect">
+      <div class="pill-circle" id="step-3">3</div>
+      <span class="pill-label">Inspect</span>
+      <span class="step-duration" id="dur-3"></span>
+    </div>
   </div>
   <div class="header-right">
     <span class="drone-model">DJI Tello</span>
@@ -31,27 +50,6 @@
     </div>
   </div>
 </header>
-
-<!-- ── Phase Timeline ────────────────────────────────── -->
-<div class="timeline" id="timeline">
-  <div class="timeline-step" data-phase="search">
-    <div class="step-circle" id="step-1">1</div>
-    <span class="step-label">Search</span>
-    <span class="step-duration" id="dur-1"></span>
-  </div>
-  <div class="timeline-connector" id="conn-1-2"><div class="fill"></div></div>
-  <div class="timeline-step" data-phase="approach">
-    <div class="step-circle" id="step-2">2</div>
-    <span class="step-label">Approach</span>
-    <span class="step-duration" id="dur-2"></span>
-  </div>
-  <div class="timeline-connector" id="conn-2-3"><div class="fill"></div></div>
-  <div class="timeline-step" data-phase="inspect">
-    <div class="step-circle" id="step-3">3</div>
-    <span class="step-label">Inspect</span>
-    <span class="step-duration" id="dur-3"></span>
-  </div>
-</div>
 
 <!-- ── Main Content ───────────────────────────────────── -->
 <div class="main-content" id="main-content">
@@ -69,58 +67,34 @@
     </div>
 
     <div class="controls-row">
-      <button class="btn btn-start" id="btn-start">Start</button>
-      <button class="btn" id="btn-pause" disabled>Pause</button>
-      <button class="btn btn-land" id="btn-land" disabled>Land</button>
-      <button class="btn btn-skip" id="btn-skip" style="display:none">Skip Phase</button>
-      <button class="btn btn-estop" id="btn-estop">E-Stop</button>
-      <button class="btn btn-mic" id="btn-mic" title="Voice Chat">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-          <line x1="12" y1="19" x2="12" y2="23"/>
-          <line x1="8" y1="23" x2="16" y2="23"/>
-        </svg>
-        <span id="mic-label">Mic Off</span>
-      </button>
-      <button class="btn btn-report" id="btn-report" style="display:none">Generate Report</button>
-    </div>
-
-    <div class="target-input-group" id="target-group">
-      <label id="target-label">Focus Object</label>
-      <input type="text" id="target-input" placeholder="What should the drone find?">
+      <div class="ctrl-group">
+        <button class="btn btn-start" id="btn-start">Start</button>
+        <button class="btn" id="btn-pause" disabled>Pause</button>
+        <button class="btn btn-land" id="btn-land" disabled>Land</button>
+      </div>
+      <div class="ctrl-group ctrl-conditional" id="ctrl-conditional" style="display:none">
+        <button class="btn btn-skip" id="btn-skip" style="display:none">Skip Phase</button>
+        <button class="btn btn-report" id="btn-report" style="display:none">Generate Report</button>
+      </div>
+      <div class="ctrl-group ctrl-safety">
+        <button class="btn btn-estop" id="btn-estop">E-Stop</button>
+      </div>
+      <div class="ctrl-group ctrl-comm">
+        <button class="btn btn-mic" id="btn-mic" title="Voice Chat">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+          <span id="mic-label">Mic Off</span>
+        </button>
+      </div>
     </div>
   </div>
 
   <!-- Right: Info Panels -->
   <div class="info-panels">
-    <!-- Telemetry Panel -->
-    <div class="panel">
-      <div class="panel-header">
-        <span class="panel-title">Telemetry</span>
-        <span class="status-badge status-idle" id="status-badge">IDLE</span>
-      </div>
-      <div class="telemetry-grid">
-        <div class="telem-item">
-          <span class="telem-label">Battery</span>
-          <span class="telem-value" id="telem-battery">—%</span>
-          <div class="telem-bar"><div class="telem-bar-fill" id="battery-bar" style="width:0%"></div></div>
-        </div>
-        <div class="telem-item">
-          <span class="telem-label">Altitude</span>
-          <span class="telem-value" id="telem-altitude">— cm</span>
-        </div>
-        <div class="telem-item">
-          <span class="telem-label">Temperature</span>
-          <span class="telem-value" id="telem-temp">— &deg;C</span>
-        </div>
-      </div>
-      <div style="margin-top:8px">
-        <span class="telem-label">Phase</span>
-        <span class="perception-value" id="telem-phase" style="margin-left:4px">—</span>
-      </div>
-    </div>
-
     <!-- Perception Panel -->
     <div class="panel">
       <div class="panel-header">
@@ -147,39 +121,38 @@
       </div>
     </div>
 
-    <!-- AI Activity Panel -->
+    <!-- Flight Stats Panel -->
     <div class="panel">
       <div class="panel-header">
-        <span class="panel-title">Gemini Performance</span>
-        <span class="badge badge-blue" id="ai-call-count">0 calls</span>
+        <span class="panel-title">Flight Stats</span>
+        <span class="status-badge status-idle" id="status-badge">IDLE</span>
+        <span class="badge badge-blue" id="cmd-count">0 cmds</span>
       </div>
-      <div class="model-badges">
-        <span class="model-badge badge-blue" id="model-flash">Flash</span>
-        <span class="model-badge badge-violet" id="model-pro">Pro</span>
+      <div class="model-indicators">
+        <span class="model-ind" id="ind-live"><span class="ind-dot"></span>Live API</span>
+        <span class="model-ind" id="ind-flash"><span class="ind-dot"></span>Flash <span class="model-count" id="flash-call-count"></span></span>
       </div>
-      <div class="ai-spinner" id="ai-spinner">
-        <svg class="spinner-svg" viewBox="0 0 24 24" fill="none" stroke="var(--violet)" stroke-width="2.5">
-          <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
-        </svg>
-        <div>
-          <div style="font-size:0.75rem;font-weight:600" id="ai-op-name">—</div>
-          <div style="font-size:0.65rem;color:var(--text-muted)" id="ai-op-desc">—</div>
+      <div class="flight-stats-grid">
+        <div class="flight-stat">
+          <div class="flight-stat-label">Mission Time</div>
+          <div class="flight-stat-value" id="fs-timer">00:00</div>
         </div>
-        <span class="perception-value" id="ai-elapsed" style="margin-left:auto">0.0s</span>
+        <div class="flight-stat">
+          <div class="flight-stat-label">Battery Rate</div>
+          <div class="flight-stat-value" id="fs-drain">— %/min</div>
+        </div>
+        <div class="flight-stat">
+          <div class="flight-stat-label">Distance</div>
+          <div class="flight-stat-value" id="fs-distance">0 cm</div>
+        </div>
+        <div class="flight-stat">
+          <div class="flight-stat-label">Est. Remaining</div>
+          <div class="flight-stat-value" id="fs-remaining">—</div>
+        </div>
       </div>
-      <div class="ai-stats-grid">
-        <div>
-          <div class="ai-stat-label">Total</div>
-          <div class="ai-stat-value" id="ai-total">0</div>
-        </div>
-        <div>
-          <div class="ai-stat-label">Avg Latency</div>
-          <div class="ai-stat-value" id="ai-avg">—</div>
-        </div>
-        <div>
-          <div class="ai-stat-label">AI Time</div>
-          <div class="ai-stat-value" id="ai-time">0s</div>
-        </div>
+      <div class="flight-activity">
+        <span class="flight-activity-label">Activity</span>
+        <span class="flight-activity-text" id="fs-activity">Idle</span>
       </div>
     </div>
 
@@ -194,6 +167,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=2"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

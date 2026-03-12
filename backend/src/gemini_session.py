@@ -65,8 +65,8 @@ class GeminiSession:
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             context_window_compression=types.ContextWindowCompressionConfig(
-                trigger_tokens=100000,
-                sliding_window=types.SlidingWindow(target_tokens=80000),
+                trigger_tokens=40000,
+                sliding_window=types.SlidingWindow(target_tokens=25000),
             ),
             session_resumption=resumption_cfg,
             realtime_input_config=types.RealtimeInputConfig(
@@ -123,6 +123,7 @@ class GeminiSession:
     async def send_audio(self, pcm_bytes: bytes) -> None:
         """Send a PCM audio chunk to the session."""
         if self._session is None:
+            logger.warning("send_audio: session is None, dropping data")
             return
         await self._session.send_realtime_input(
             audio=types.Blob(
@@ -134,6 +135,7 @@ class GeminiSession:
     async def send_video(self, jpeg_bytes: bytes) -> None:
         """Send a JPEG video frame to the session."""
         if self._session is None:
+            logger.warning("send_video: session is None, dropping frame")
             return
         await self._session.send_realtime_input(
             video=types.Blob(data=jpeg_bytes, mime_type="image/jpeg"),
@@ -148,6 +150,7 @@ class GeminiSession:
     ) -> None:
         """Send a function-call response back to Gemini."""
         if self._session is None:
+            logger.warning("send_tool_response: session is None, dropping response for %s", name)
             return
 
         sched_enum = None
@@ -171,6 +174,7 @@ class GeminiSession:
     async def send_text(self, text: str) -> None:
         """Inject a text message into the session via ``send_client_content``."""
         if self._session is None:
+            logger.warning("send_text: session is None, dropping text")
             return
         await self._session.send_client_content(
             turns=types.Content(
@@ -187,8 +191,15 @@ class GeminiSession:
 
         Used to send captured frames (e.g. inspection angles) for Gemini
         to analyze and provide a verbal assessment.
+
+        NOTE: Currently unused — inspection reports are generated via the Flash
+        API (VisualPerceptionClient). Reserved for future Live API verbal analysis.
         """
         if self._session is None:
+            logger.warning(
+                "send_frames_with_prompt: session is None, dropping %d frames",
+                len(frames_jpeg),
+            )
             return
         parts: list[types.Part] = []
         for i, jpeg in enumerate(frames_jpeg):

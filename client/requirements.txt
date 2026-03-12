@@ -8,3 +8,4 @@ uvicorn[standard]>=0.34.0
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
 webrtcvad>=2.0.10
+google-genai>=1.0.0

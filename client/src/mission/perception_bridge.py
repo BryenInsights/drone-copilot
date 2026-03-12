@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time as _time
 
 from client.src.models.tool_calls import ReportPerceptionParams
 
@@ -54,25 +55,34 @@ class PerceptionBridge:
         self._event.set()
 
     def wait_for_perception(
-        self, timeout: float = 5.0,
+        self,
+        timeout: float = 5.0,
+        abort_event: threading.Event | None = None,
     ) -> ReportPerceptionParams | None:
-        """Block until a new perception arrives or timeout.
+        """Block until a new perception arrives, timeout, or abort.
 
         Clears the event first so we only accept perceptions that arrive
         *after* this call, then waits up to ``timeout`` seconds.
+        When *abort_event* is provided, polls in 0.25s intervals so we
+        can bail out quickly if the user says "Stop".
         """
         self._event.clear()
-        arrived = self._event.wait(timeout=timeout)
+        if abort_event is None:
+            arrived = self._event.wait(timeout=timeout)
+        else:
+            deadline = _time.monotonic() + timeout
+            arrived = False
+            while True:
+                if abort_event.is_set():
+                    return None
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    break
+                arrived = self._event.wait(timeout=min(0.25, remaining))
+                if arrived:
+                    break
         if not arrived:
             return None
         with self._lock:
             return self._latest
 
-    @staticmethod
-    def build_nudge_text(target_description: str) -> str:
-        """Return a prompt asking Gemini to call report_perception."""
-        return (
-            f"Please look at the camera feed and call the report_perception "
-            f"tool to tell me where '{target_description}' is in the frame. "
-            f"Report its position, size, and your confidence."
-        )

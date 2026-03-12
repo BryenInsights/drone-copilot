@@ -42,25 +42,37 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 ## Architecture
 
 ```
-┌─────────────────────┐     WebSocket      ┌──────────────────────┐
-│   LOCAL CLIENT      │◄──────────────────►│   GCP BACKEND        │
-│   (MacBook)         │  audio + video →   │   (Cloud Run)        │
-│                     │  ← voice + tools   │                      │
-│  ┌───────────────┐  │                    │  ┌────────────────┐  │
-│  │ DJI Tello     │  │                    │  │ Gemini Live    │  │
-│  │ Drone (WiFi)  │  │                    │  │ API Session    │  │
-│  └───────────────┘  │                    │  └────────────────┘  │
-│  ┌───────────────┐  │                    └──────────────────────┘
-│  │ Mic + Speaker │  │
-│  └───────────────┘  │
-│  ┌───────────────┐  │
-│  │ Web Dashboard │  │     Browser
-│  │ (FastAPI)     │──────► Live video, telemetry, transcript,
-│  └───────────────┘  │     mission status, AI performance
-└─────────────────────┘
+┌─────────────────────────┐                ┌────────────── Google Cloud ──────────────┐
+│      LOCAL CLIENT        │   WebSocket    │                                          │
+│      (MacBook)           │◄─────────────►│  Cloud Run (Backend)                     │
+│                          │ audio+video →  │  ┌──────────────────────────────────┐    │
+│  ┌────────────────────┐  │ ← voice+tools │  │  FastAPI WebSocket Relay          │    │
+│  │ DJI Tello Drone    │  │               │  │  ┌────────────────────────────┐   │    │
+│  │ (WiFi control +    │  │               │  │  │  Gemini Live API Session   │   │    │
+│  │  720p video feed)  │  │               │  │  │  (Vertex AI)               │   │    │
+│  └────────────────────┘  │               │  │  │  • Bidirectional audio     │   │    │
+│  ┌────────────────────┐  │               │  │  │  • Video frame analysis    │   │    │
+│  │ Mic (16kHz) +      │  │               │  │  │  • Tool calls → drone     │   │    │
+│  │ Speaker (24kHz)    │  │               │  │  │  • Session resumption      │   │    │
+│  │ VAD filtering      │  │               │  │  └────────────────────────────┘   │    │
+│  └────────────────────┘  │               │  └──────────────────────────────────┘    │
+│  ┌────────────────────┐  │               │                                          │
+│  │ Visual Perception  │  │               │  Vertex AI (Gemini Flash API)            │
+│  │ (Gemini Flash)     │──────────────────┤  • Bounding box detection                │
+│  └────────────────────┘  │               │  • Inspection report generation           │
+│  ┌────────────────────┐  │               │                                          │
+│  │ Mission Controller │  │               │  Cloud Build (CI/CD)                     │
+│  │ Search + Inspect   │  │               │  Secret Manager                          │
+│  │ Approach + Orbit   │  │               │  Container Registry                      │
+│  └────────────────────┘  │               └──────────────────────────────────────────┘
+│  ┌────────────────────┐  │
+│  │ Web Dashboard      │  │    Browser
+│  │ (FastAPI :8081)    │──────► Live video, telemetry, transcript,
+│  └────────────────────┘  │     mission status, AI performance
+└─────────────────────────┘
 ```
 
-**Split architecture**: The GCP Cloud Run backend hosts a persistent Gemini Live API session for real-time bidirectional audio and video analysis. The local Python client connects to the DJI Tello drone, captures audio/video, streams them to the backend, and executes validated drone commands. A web dashboard provides real-time monitoring for observers.
+**Split architecture**: The GCP Cloud Run backend hosts a persistent Gemini Live API session via **Vertex AI** for real-time bidirectional audio and video streaming. The local Python client connects to the DJI Tello drone, captures audio/video, streams them to the backend over WebSocket, and executes validated drone commands. A separate **Gemini Flash** (Vertex AI) client handles visual perception — bounding box detection during autonomous missions and multi-angle inspection reports. A web dashboard provides real-time monitoring for observers. All Gemini API calls route through Google Cloud (Vertex AI), with Cloud Run authenticating automatically via Application Default Credentials.
 
 ---
 
@@ -130,12 +142,12 @@ open http://localhost:8081
 The backend is deployed on **Google Cloud Run** with WebSocket support for persistent bidirectional streaming.
 
 ```bash
-# One-time GCP setup
+# One-time GCP setup (enables Cloud Run, Vertex AI, etc.)
 cd deploy/scripts
 ./setup-gcp.sh <YOUR_PROJECT_ID>
 
-# Deploy
-./deploy.sh <YOUR_PROJECT_ID> <YOUR_GEMINI_API_KEY>
+# Deploy (uses Vertex AI — no API key needed on Cloud Run)
+./deploy.sh <YOUR_PROJECT_ID>
 ```
 
 Or with Terraform:
@@ -156,8 +168,8 @@ terraform apply -var="project_id=<ID>" -var="image=gcr.io/<ID>/drone-copilot-bac
 
 | Technology | Purpose |
 |-----------|---------|
-| **Gemini Live API** | Real-time bidirectional audio + video AI session |
-| **google-genai SDK** | Python SDK for Gemini Live API |
+| **Gemini Live API** | Real-time bidirectional audio + video AI session (via Vertex AI) |
+| **google-genai SDK** | Python SDK for Gemini Live API + Vertex AI |
 | **Tool Calls** | Structured AI-to-drone command interface (10 tools) |
 | **Multimodal Input** | Simultaneous audio + video streaming to Gemini |
 | **Context Window Compression** | Unlimited session duration (sliding window) |

@@ -55,6 +55,7 @@ class CommandExecutor:
         self._last_command_time: float = 0.0
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_stop = threading.Event()
+        self._heartbeat_paused = threading.Event()  # Set = paused
         self._running = False
         self._on_heartbeat_safety: Callable[[], None] | None = None
 
@@ -83,6 +84,16 @@ class CommandExecutor:
             self._heartbeat_thread = None
         logger.info("Heartbeat thread stopped")
 
+    def pause_heartbeat(self) -> None:
+        """Pause heartbeat to prevent UDP response interleaving with flight commands."""
+        self._heartbeat_paused.set()
+        logger.debug("Heartbeat paused")
+
+    def resume_heartbeat(self) -> None:
+        """Resume heartbeat after flight command completes."""
+        self._heartbeat_paused.clear()
+        logger.debug("Heartbeat resumed")
+
     def _heartbeat_loop(self) -> None:
         """Send periodic queries to keep the Tello connection alive."""
         # Wait for initialization commands (connect, streamon) to settle
@@ -91,21 +102,15 @@ class CommandExecutor:
             return
 
         while self._running and not self._heartbeat_stop.is_set():
+            # Skip heartbeat while paused (prevents UDP response interleaving)
+            if self._heartbeat_paused.is_set():
+                self._heartbeat_stop.wait(timeout=1.0)
+                continue
             # Non-blocking acquire — skip if a command is in progress (lesson C5)
             if self._lock.acquire(blocking=False):
                 try:
-                    use_rc = (
-                        self._state is not None
-                        and self._state.is_flying
-                        and self._state.takeoff_time is not None
-                        and (time.time() - self._state.takeoff_time) > 5.0
-                    )
-                    if use_rc:
-                        self.drone.send_rc_control(0, 0, 0, 0)
-                        logger.debug("Heartbeat: hover keepalive sent")
-                    else:
-                        self.drone.query_battery()
-                        logger.debug("Heartbeat: battery query sent")
+                    self.drone.query_battery()
+                    logger.debug("Heartbeat: battery query sent")
                 except (ValueError, TypeError):
                     pass  # UDP response mismatch — harmless
                 except Exception:

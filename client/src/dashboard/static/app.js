@@ -1,5 +1,5 @@
 /**
- * Gemi-fly Dashboard — app.js
+ * Drone Copilot Dashboard — app.js
  *
  * Vanilla ES6+ classes. WebSocket-driven real-time drone mission dashboard
  * with perception overlay, AI activity tracking, and PDF report generation.
@@ -110,6 +110,7 @@ class CanvasRenderer {
     this._ctx = canvas.getContext('2d');
     this._perception = null;
     this._perceptionTime = 0;
+    this._telemetry = null;
     this._hasFrame = false;
   }
 
@@ -128,12 +129,93 @@ class CanvasRenderer {
     this._perceptionTime = performance.now();
   }
 
+  updateTelemetry(data) {
+    this._telemetry = { ...this._telemetry, ...data };
+  }
+
+  _drawHUDPanel(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    ctx.fill();
+  }
+
+  _drawHUD(ctx, w, h) {
+    if (!this._telemetry) return;
+    const t = this._telemetry;
+    ctx.save();
+
+    const panelR = 6;
+    const panelBg = 'rgba(0,0,0,0.45)';
+    const labelFont = '500 10px "Roboto", sans-serif';
+    const valueFont = '600 14px "Roboto Mono", monospace';
+
+    // ── Top-left: Battery + Altitude + Temp + Phase ──
+    if (t.battery !== undefined || t.altitude !== undefined) {
+      ctx.fillStyle = panelBg;
+      this._drawHUDPanel(ctx, 12, 12, 140, 96, panelR);
+
+      // Battery
+      const bat = t.battery ?? 0;
+      ctx.font = labelFont;
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText('BAT', 20, 30);
+      ctx.font = valueFont;
+      ctx.fillStyle = bat > 50 ? '#34a853' : bat > 20 ? '#e37400' : '#ea4335';
+      ctx.fillText(bat + '%', 48, 30);
+
+      // Altitude
+      ctx.font = labelFont;
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText('ALT', 20, 52);
+      ctx.font = valueFont;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText((t.altitude ?? 0) + 'cm', 48, 52);
+
+      // Temperature
+      ctx.font = labelFont;
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText('TMP', 20, 74);
+      ctx.font = valueFont;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText((t.temp ?? 0) + '\u00B0C', 48, 74);
+
+      // Phase
+      ctx.font = labelFont;
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText('PHS', 20, 96);
+      ctx.font = valueFont;
+      ctx.fillStyle = '#ffffff';
+      let phaseStr = t.phase ? t.phase.toUpperCase() : '\u2014';
+      if (t.phase && t.step && t.maxSteps) phaseStr += ' ' + t.step + '/' + t.maxSteps;
+      ctx.fillText(phaseStr, 48, 96);
+    }
+
+    // ── Bottom-left: Mission timer ──
+    if (t.missionElapsed && t.missionElapsed > 0) {
+      const mins = String(Math.floor(t.missionElapsed / 60)).padStart(2, '0');
+      const secs = String(t.missionElapsed % 60).padStart(2, '0');
+      const timerStr = `T+ ${mins}:${secs}`;
+
+      ctx.fillStyle = panelBg;
+      this._drawHUDPanel(ctx, 12, h - 40, 90, 28, panelR);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '600 12px "Roboto Mono", monospace';
+      ctx.fillText(timerStr, 20, h - 20);
+    }
+
+    ctx.restore();
+  }
+
   _drawOverlay() {
     const ctx = this._ctx;
     const w = this._canvas.width;
     const h = this._canvas.height;
     const cx = w / 2;
     const cy = h / 2;
+
+    // HUD telemetry overlay — drawn first so perception renders on top
+    this._drawHUD(ctx, w, h);
 
     // Center crosshair — always visible, subtle
     ctx.save();
@@ -165,7 +247,7 @@ class CanvasRenderer {
     ctx.globalAlpha = alpha;
 
     // Target crosshair
-    const color = p.target_visible ? '#16a34a' : '#dc2626';
+    const color = p.target_visible ? '#34a853' : '#ea4335';
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -184,20 +266,32 @@ class CanvasRenderer {
     if (p.target_visible) {
       const conf = Math.round(p.confidence * 100);
       ctx.fillStyle = color;
-      ctx.font = '600 12px "DM Sans", sans-serif';
+      ctx.font = '600 12px "Roboto", sans-serif';
       ctx.fillText(conf + '%', tx + radius + 4, ty - 2);
+    }
+
+    // Bounding box from box_2d [ymin, xmin, ymax, xmax] (0-1000 scale)
+    if (p.box_2d && p.target_visible) {
+      const [ymin, xmin, ymax, xmax] = p.box_2d;
+      const bx = (xmin / 1000) * w;
+      const by = (ymin / 1000) * h;
+      const bw = ((xmax - xmin) / 1000) * w;
+      const bh = ((ymax - ymin) / 1000) * h;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bx, by, bw, bh);
     }
 
     // Obstacle warning
     if (p.obstacle_ahead) {
-      ctx.fillStyle = '#dc2626';
-      ctx.font = '700 14px "DM Sans", sans-serif';
+      ctx.fillStyle = '#ea4335';
+      ctx.font = '700 14px "Roboto", sans-serif';
       ctx.fillText('OBSTACLE', cx - 36, h - 50);
     }
 
     // Age indicator
     ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.font = '11px "JetBrains Mono", monospace';
+    ctx.font = '11px "Roboto Mono", monospace';
     ctx.fillText(age.toFixed(1) + 's ago', w - 72, h - 10);
 
     ctx.restore();
@@ -239,10 +333,10 @@ class PhaseTimeline {
       this._phaseStartTimes[phase] = performance.now();
       const n = idx + 1;
       const circle = document.getElementById('step-' + n);
-      const label = circle?.parentElement?.querySelector('.step-label');
+      const label = circle?.parentElement?.querySelector('.pill-label');
       const dur = document.getElementById('dur-' + n);
-      if (circle) { circle.className = 'step-circle active'; }
-      if (label) { label.className = 'step-label active'; }
+      if (circle) { circle.className = 'pill-circle active'; }
+      if (label) { label.className = 'pill-label active'; }
       if (dur) { dur.textContent = '...'; }
     }
   }
@@ -253,11 +347,11 @@ class PhaseTimeline {
     const idx = PHASE_INDEX[phase];
     const n = idx + 1;
     const circle = document.getElementById('step-' + n);
-    const label = circle?.parentElement?.querySelector('.step-label');
+    const label = circle?.parentElement?.querySelector('.pill-label');
     const dur = document.getElementById('dur-' + n);
 
-    if (circle) { circle.className = 'step-circle complete'; circle.innerHTML = '\u2713'; }
-    if (label) { label.className = 'step-label complete'; }
+    if (circle) { circle.className = 'pill-circle complete'; circle.innerHTML = '\u2713'; }
+    if (label) { label.className = 'pill-label complete'; }
 
     // Duration
     if (dur && this._phaseStartTimes[phase]) {
@@ -278,10 +372,10 @@ class PhaseTimeline {
     this._phaseStartTimes = {};
     for (let i = 1; i <= 3; i++) {
       const circle = document.getElementById('step-' + i);
-      const label = circle?.parentElement?.querySelector('.step-label');
+      const label = circle?.parentElement?.querySelector('.pill-label');
       const dur = document.getElementById('dur-' + i);
-      if (circle) { circle.className = 'step-circle'; circle.textContent = i; }
-      if (label) { label.className = 'step-label'; }
+      if (circle) { circle.className = 'pill-circle'; circle.textContent = i; }
+      if (label) { label.className = 'pill-label'; }
       if (dur) { dur.textContent = ''; }
     }
     for (let i = 1; i < 3; i++) {
@@ -291,106 +385,148 @@ class PhaseTimeline {
   }
 }
 
-// ─── AI Activity Tracker ───────────────────────────────────────
-class AITracker {
+// ─── Flight Stats ─────────────────────────────────────────────
+class FlightStats {
   constructor() {
-    this._totalCalls = 0;
-    this._totalLatency = 0;
-    this._totalAITime = 0;
-    this._activeTimer = null;
-    this._activeStart = 0;
-    this._activeModel = null;
+    this._timer = document.getElementById('fs-timer');
+    this._drain = document.getElementById('fs-drain');
+    this._distance = document.getElementById('fs-distance');
+    this._remaining = document.getElementById('fs-remaining');
+    this._activity = document.getElementById('fs-activity');
+    this._cmdCount = document.getElementById('cmd-count');
+    this._indLive = document.getElementById('ind-live');
+    this._indFlash = document.getElementById('ind-flash');
 
-    this._spinner = document.getElementById('ai-spinner');
-    this._opName = document.getElementById('ai-op-name');
-    this._opDesc = document.getElementById('ai-op-desc');
-    this._elapsed = document.getElementById('ai-elapsed');
-    this._callCount = document.getElementById('ai-call-count');
-    this._total = document.getElementById('ai-total');
-    this._avg = document.getElementById('ai-avg');
-    this._time = document.getElementById('ai-time');
-    this._flashBadge = document.getElementById('model-flash');
-    this._proBadge = document.getElementById('model-pro');
+    this._missionStart = null;
+    this._timerInterval = null;
+    this._totalDistanceCm = 0;
+    this._commandCount = 0;
+    this._firstBattery = null;
+    this._lastBattery = null;
+    this._flashTimeout = null;
+    this._flashCallCount = 0;
+    this._flashCountEl = document.getElementById('flash-call-count');
   }
 
-  onActivity(data) {
-    if (data.status === 'started') {
-      this._activeStart = performance.now();
-      this._activeModel = data.model || '';
+  onTelemetry(data) {
+    const now = Date.now();
+    const bat = data.battery;
+    if (bat == null) return;
+    if (!this._firstBattery) this._firstBattery = {value: bat, time: now};
+    this._lastBattery = {value: bat, time: now};
+    this._updateDrain();
+  }
 
-      if (this._opName) this._opName.textContent = data.operation || '—';
-      if (this._opDesc) this._opDesc.textContent = data.description || '';
-      if (this._elapsed) this._elapsed.textContent = '0.0s';
-      if (this._spinner) this._spinner.classList.add('active');
+  onStatus(data) {
+    const state = (data.state || '').toUpperCase();
+    const phase = data.phase || '';
 
-      // Model badge
-      this._flashBadge?.classList.remove('active');
-      this._proBadge?.classList.remove('active');
-      if (this._activeModel.toLowerCase().includes('flash')) {
-        this._flashBadge?.classList.add('active');
-      } else if (this._activeModel.toLowerCase().includes('pro')) {
-        this._proBadge?.classList.add('active');
-      }
+    if (state === 'EXECUTING' && !this._missionStart) {
+      this._missionStart = Date.now();
+      this._startTimer();
+    }
+    if (['COMPLETE', 'IDLE', 'ERROR'].includes(state) && this._missionStart) {
+      this._stopTimer();
+    }
 
-      // Start elapsed timer
-      this._clearTimer();
-      this._activeTimer = setInterval(() => {
-        const e = (performance.now() - this._activeStart) / 1000;
-        if (this._elapsed) this._elapsed.textContent = e.toFixed(1) + 's';
-      }, 100);
+    const activityMap = {
+      search: 'Searching',
+      approach: 'Approaching',
+      inspect: 'Inspecting',
+    };
+    if (state === 'IDLE') this._activity.textContent = 'Idle';
+    else if (state === 'COMPLETE') this._activity.textContent = 'Complete';
+    else if (phase && activityMap[phase]) this._activity.textContent = activityMap[phase];
+    else if (state === 'EXECUTING') this._activity.textContent = 'Free Flying';
+  }
 
-    } else if (data.status === 'completed' || data.status === 'error') {
-      this._clearTimer();
-      this._totalCalls++;
-      const latency = data.latency_ms || 0;
-      this._totalLatency += latency;
-      this._totalAITime += latency;
+  onLog(data) {
+    if (data.level !== 'COMMAND') return;
+    this._commandCount++;
+    this._cmdCount.textContent = `${this._commandCount} cmds`;
 
-      // Brief green/red flash on spinner then hide
-      if (this._spinner) {
-        this._spinner.style.background = data.status === 'completed'
-          ? 'rgba(22,163,74,0.08)' : 'rgba(220,38,38,0.08)';
-        setTimeout(() => {
-          if (this._spinner) {
-            this._spinner.classList.remove('active');
-            this._spinner.style.background = '';
-          }
-        }, 1200);
-      }
-
-      // Deactivate model badges
-      setTimeout(() => {
-        this._flashBadge?.classList.remove('active');
-        this._proBadge?.classList.remove('active');
-      }, 1200);
-
-      this._updateStats();
+    const match = (data.message || '').match(/(\d+)\s*cm/);
+    if (match) {
+      this._totalDistanceCm += parseInt(match[1], 10);
+      const m = (this._totalDistanceCm / 100).toFixed(1);
+      this._distance.textContent = this._totalDistanceCm >= 100
+        ? `${m} m` : `${this._totalDistanceCm} cm`;
     }
   }
 
-  _clearTimer() {
-    if (this._activeTimer) { clearInterval(this._activeTimer); this._activeTimer = null; }
+  onConnected() { this._indLive?.classList.add('active'); }
+  onDisconnected() { this._indLive?.classList.remove('active'); }
+
+  onAIActivity(data) {
+    this._indFlash?.classList.add('active-flash');
+    if (this._flashTimeout) clearTimeout(this._flashTimeout);
+    this._flashTimeout = setTimeout(() => {
+      this._indFlash?.classList.remove('active-flash');
+    }, 1200);
+    if (data.source === 'flash') {
+      this._flashCallCount++;
+      if (this._flashCountEl) this._flashCountEl.textContent = `(${this._flashCallCount})`;
+    }
   }
 
-  _updateStats() {
-    if (this._callCount) this._callCount.textContent = this._totalCalls + ' calls';
-    if (this._total) this._total.textContent = this._totalCalls;
-    if (this._avg) {
-      this._avg.textContent = this._totalCalls > 0
-        ? (this._totalLatency / this._totalCalls / 1000).toFixed(1) + 's' : '—';
-    }
-    if (this._time) this._time.textContent = (this._totalAITime / 1000).toFixed(0) + 's';
+  onAIResult(data) {
+    this._indFlash?.classList.add('active-flash');
+    if (this._flashTimeout) clearTimeout(this._flashTimeout);
+    this._flashTimeout = setTimeout(() => {
+      this._indFlash?.classList.remove('active-flash');
+    }, 1200);
   }
 
   reset() {
-    this._clearTimer();
-    this._totalCalls = 0;
-    this._totalLatency = 0;
-    this._totalAITime = 0;
-    this._spinner?.classList.remove('active');
-    this._flashBadge?.classList.remove('active');
-    this._proBadge?.classList.remove('active');
-    this._updateStats();
+    this._missionStart = null;
+    this._stopTimer();
+    this._totalDistanceCm = 0;
+    this._commandCount = 0;
+    this._firstBattery = null;
+    this._lastBattery = null;
+    this._timer.textContent = '00:00';
+    this._drain.textContent = '\u2014 %/min';
+    this._distance.textContent = '0 cm';
+    this._remaining.textContent = '\u2014';
+    this._activity.textContent = 'Idle';
+    this._cmdCount.textContent = '0 cmds';
+    this._flashCallCount = 0;
+    if (this._flashCountEl) this._flashCountEl.textContent = '';
+  }
+
+  getElapsedSeconds() {
+    if (!this._missionStart) return 0;
+    return Math.floor((Date.now() - this._missionStart) / 1000);
+  }
+
+  _startTimer() {
+    this._timerInterval = setInterval(() => {
+      if (!this._missionStart) return;
+      const elapsed = Math.floor((Date.now() - this._missionStart) / 1000);
+      const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+      const s = String(elapsed % 60).padStart(2, '0');
+      this._timer.textContent = `${m}:${s}`;
+    }, 1000);
+  }
+
+  _stopTimer() {
+    if (this._timerInterval) clearInterval(this._timerInterval);
+    this._timerInterval = null;
+  }
+
+  _updateDrain() {
+    if (!this._firstBattery || !this._lastBattery) return;
+    const elapsedMin = (this._lastBattery.time - this._firstBattery.time) / 60000;
+    if (elapsedMin < 0.5) return;
+    const drop = this._firstBattery.value - this._lastBattery.value;
+    const rate = drop / elapsedMin;
+    this._drain.textContent = `${rate.toFixed(1)} %/min`;
+
+    if (rate > 0 && this._lastBattery.value > 0) {
+      const safeRemaining = Math.max(0, this._lastBattery.value - 20);
+      const remainMin = safeRemaining / rate;
+      this._remaining.textContent = `~${Math.round(remainMin)} min`;
+    }
   }
 }
 
@@ -767,6 +903,7 @@ class Dashboard {
     // State
     this._demoMode = false;
     this._currentState = 'IDLE';
+    this._missionActive = false;
     this._currentPhase = null;
     this._reportData = null;
     this._currentTarget = '';
@@ -775,7 +912,7 @@ class Dashboard {
     this._ws = new WSManager(this);
     this._canvas = new CanvasRenderer(document.getElementById('video-canvas'));
     this._timeline = new PhaseTimeline();
-    this._ai = new AITracker();
+    this._flightStats = new FlightStats();
     this._log = new MissionLog();
 
     // DOM refs
@@ -784,11 +921,6 @@ class Dashboard {
     this._demoBadge = document.getElementById('demo-badge');
     this._placeholder = document.getElementById('video-placeholder');
     this._statusBadge = document.getElementById('status-badge');
-    this._telemBattery = document.getElementById('telem-battery');
-    this._batteryBar = document.getElementById('battery-bar');
-    this._telemAlt = document.getElementById('telem-altitude');
-    this._telemTemp = document.getElementById('telem-temp');
-    this._telemPhase = document.getElementById('telem-phase');
     this._percTarget = document.getElementById('perc-target');
     this._percVisibleDot = document.getElementById('perc-visible-dot');
     this._confBar = document.getElementById('conf-bar');
@@ -824,11 +956,13 @@ class Dashboard {
   onConnected() {
     this._connDot?.classList.add('connected');
     if (this._connText) this._connText.textContent = 'Connected';
+    this._flightStats.onConnected();
   }
 
   onDisconnected() {
     this._connDot?.classList.remove('connected');
     if (this._connText) this._connText.textContent = 'Disconnected';
+    this._flightStats.onDisconnected();
   }
 
   onMessage(msg) {
@@ -864,13 +998,8 @@ class Dashboard {
     const altitude = data.altitude ?? 0;
     const temp = data.temperature ?? 0;
 
-    if (this._telemBattery) this._telemBattery.textContent = battery + '%';
-    if (this._batteryBar) {
-      this._batteryBar.style.width = battery + '%';
-      this._batteryBar.classList.toggle('low', battery < 20);
-    }
-    if (this._telemAlt) this._telemAlt.textContent = altitude + ' cm';
-    if (this._telemTemp) this._telemTemp.textContent = temp + '\u00B0C';
+    this._flightStats.onTelemetry(data);
+    this._canvas.updateTelemetry({ battery, altitude, temp });
   }
 
   _onStatus(data) {
@@ -879,8 +1008,10 @@ class Dashboard {
     const step = data.step;
     const maxSteps = data.max_steps;
     const target = data.target;
+    const missionStatus = data.status || null;
 
     this._currentState = state;
+    this._missionActive = ['searching', 'approaching', 'inspecting'].includes(missionStatus);
     this._currentPhase = phase;
     if (target) this._currentTarget = target;
 
@@ -889,15 +1020,8 @@ class Dashboard {
 
     // Phase timeline
     this._timeline.update(phase);
-
-    // Phase row in telemetry
-    if (this._telemPhase) {
-      let phaseText = phase || '—';
-      if (step !== undefined && maxSteps) {
-        phaseText += ` (${step}/${maxSteps})`;
-      }
-      this._telemPhase.textContent = phaseText;
-    }
+    this._flightStats.onStatus(data);
+    this._canvas.updateTelemetry({ phase, step, maxSteps, missionElapsed: this._flightStats.getElapsedSeconds() });
 
     // Perception target
     if (target && this._percTarget) this._percTarget.textContent = target;
@@ -911,6 +1035,7 @@ class Dashboard {
     // Reset on idle
     if (state === 'IDLE' || state === 'READY') {
       this._timeline.reset();
+      this._flightStats.reset();
     }
     if (state === 'COMPLETE') {
       this._timeline.update('complete');
@@ -938,6 +1063,7 @@ class Dashboard {
 
   _onLog(data) {
     this._log.addEntry(data.level || 'INFO', data.message || '', data.timestamp);
+    this._flightStats.onLog(data);
   }
 
   _onTranscript(data, timestamp) {
@@ -945,16 +1071,26 @@ class Dashboard {
   }
 
   _onAIActivity(data) {
-    this._ai.onActivity(data);
+    this._flightStats.onAIActivity(data);
   }
 
   _onAIResult(data, timestamp) {
     this._log.addResultCard(data, timestamp);
+    this._flightStats.onAIResult(data);
   }
 
   _onReportData(data) {
     this._reportData = data;
     if (this._btnReport) this._btnReport.style.display = '';
+    this._updateConditionalGroup();
+  }
+
+  _updateConditionalGroup() {
+    const group = document.getElementById('ctrl-conditional');
+    if (!group) return;
+    const hasVisible = Array.from(group.querySelectorAll('.btn'))
+      .some(btn => btn.style.display !== 'none');
+    group.style.display = hasVisible ? '' : 'none';
   }
 
   // ── Status Badge ─────────────────────────────────────────────
@@ -978,7 +1114,13 @@ class Dashboard {
   // ── Button Logic ─────────────────────────────────────────────
   _bindButtons() {
     this._btnStart?.addEventListener('click', () => this._sendCommand('start'));
-    this._btnPause?.addEventListener('click', () => this._sendCommand('pause'));
+    this._btnPause?.addEventListener('click', () => {
+      if (this._missionActive) {
+        this._sendCommand('abort_mission');
+      } else {
+        this._sendCommand('pause');
+      }
+    });
     this._btnLand?.addEventListener('click', () => this._sendCommand('land'));
     this._btnEstop?.addEventListener('click', () => this._sendCommand('emergency_land'));
     this._btnSkip?.addEventListener('click', () => this._sendCommand('skip_phase'));
@@ -1023,17 +1165,27 @@ class Dashboard {
     const executing = ['TAKEOFF', 'EXECUTING', 'LANDING'].includes(s);
     const idle = ['IDLE', 'READY', 'CONNECTED', 'COMPLETE'].includes(s);
 
-    if (this._btnStart) this._btnStart.disabled = !idle;
-    if (this._btnPause) this._btnPause.disabled = !executing;
-    if (this._btnLand) this._btnLand.disabled = !executing && s !== 'COMPLETE';
+    if (this._btnStart) this._btnStart.disabled = !idle && !this._missionActive;
+    if (this._btnPause) {
+      if (this._missionActive) {
+        this._btnPause.disabled = false;
+        this._btnPause.textContent = 'Stop Mission';
+        this._btnPause.classList.add('btn-abort');
+      } else {
+        this._btnPause.disabled = !executing;
+        this._btnPause.textContent = 'Pause';
+        this._btnPause.classList.remove('btn-abort');
+      }
+    }
+    if (this._btnLand) this._btnLand.disabled = !executing && !this._missionActive && s !== 'COMPLETE';
 
-    // Target input disabled while executing
-    if (this._targetInput) this._targetInput.disabled = executing;
+    // Target input disabled while executing or mission active
+    if (this._targetInput) this._targetInput.disabled = executing || this._missionActive;
   }
 
   _updateSkipLabel(phase) {
     if (!this._btnSkip) return;
-    if (!this._demoMode) { this._btnSkip.style.display = 'none'; return; }
+    if (!this._demoMode) { this._btnSkip.style.display = 'none'; this._updateConditionalGroup(); return; }
 
     this._btnSkip.style.display = '';
     if (phase === 'approach') {
@@ -1043,6 +1195,7 @@ class Dashboard {
     } else {
       this._btnSkip.textContent = 'Skip Phase';
     }
+    this._updateConditionalGroup();
   }
 
   // ── Demo Mode ────────────────────────────────────────────────
@@ -1105,65 +1258,130 @@ class Dashboard {
 
     const findings = (result.findings || []).map(f => `<li>${escapeHtml(f)}</li>`).join('');
     const phases = (meta.phases_completed || []).map(p =>
-      `<span style="display:inline-block;padding:2px 8px;background:rgba(22,163,74,0.08);color:#16a34a;border-radius:10px;font-size:0.75rem;font-weight:600;margin-right:4px">${p}</span>`
+      `<span style="display:inline-block;padding:2px 8px;background:rgba(52,168,83,0.06);color:#34a853;border-radius:10px;font-size:0.75rem;font-weight:600;margin-right:4px">${p}</span>`
     ).join('');
+
+    // Condition badge color
+    const conditionColor = (() => {
+      const c = (result.condition || '').toLowerCase();
+      if (c === 'excellent' || c === 'good') return { bg: 'rgba(52,168,83,0.08)', fg: '#34a853' };
+      if (c === 'fair') return { bg: 'rgba(251,188,4,0.1)', fg: '#e37400' };
+      return { bg: 'rgba(234,67,53,0.08)', fg: '#ea4335' };
+    })();
+
+    // Build per-angle cards
+    const perAngleCards = (result.per_angle || []).map(pa => {
+      // Try to match a frame by label containing the angle name
+      const matchedFrame = (rd.inspection_frames || []).find(f =>
+        f.label && pa.angle && f.label.toLowerCase().includes(pa.angle.toLowerCase())
+      );
+      const thumb = matchedFrame
+        ? `<img src="data:image/jpeg;base64,${matchedFrame.base64}" style="width:120px;height:90px;object-fit:cover;border-radius:6px;border:1px solid #dadce0;flex-shrink:0">`
+        : '';
+      return `<div style="display:flex;gap:12px;align-items:flex-start;padding:10px 12px;background:#f8f9fa;border-radius:8px;margin-bottom:8px">
+        ${thumb}
+        <div>
+          <div style="font-size:0.75rem;font-weight:600;color:#5f6368;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:2px">${escapeHtml(pa.angle)}</div>
+          <div style="font-size:0.85rem">${escapeHtml(pa.observation)}</div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // Build visible text chips
+    const textChips = (result.visible_text || []).map(t =>
+      `<span style="display:inline-block;padding:3px 10px;background:#e8f0fe;color:#1967d2;border-radius:12px;font-family:'Roboto Mono',monospace;font-size:0.8rem;font-weight:500;margin:3px 4px">${escapeHtml(t)}</span>`
+    ).join('');
+
+    // Build damage section
+    const damageItems = result.damage_details || [];
+    const damageSection = damageItems.length > 0
+      ? `<div style="padding:12px 16px;background:rgba(234,67,53,0.04);border:1px solid rgba(234,67,53,0.15);border-radius:8px;margin:8px 0">
+          <ul style="padding-left:20px;margin:0">${damageItems.map(d => `<li style="font-size:0.85rem;margin-bottom:4px;color:#c5221f">${escapeHtml(d)}</li>`).join('')}</ul>
+        </div>`
+      : `<div style="padding:10px 16px;background:rgba(52,168,83,0.04);border:1px solid rgba(52,168,83,0.15);border-radius:8px;margin:8px 0;font-size:0.85rem;color:#34a853">No damage detected — object appears clean.</div>`;
 
     const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Mission Report — ${escapeHtml(meta.target || 'Unknown')}</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif&family=JetBrains+Mono:wght@400;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap');
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'DM Sans',sans-serif; background:#f6f4f1; color:#1a1816; padding:40px; line-height:1.6; }
-  .report { max-width:800px; margin:0 auto; background:white; border-radius:12px; border:1px solid #e8e4df; overflow:hidden; }
-  .report-header { padding:24px 32px; border-bottom:1px solid #e8e4df; display:flex; align-items:center; justify-content:space-between; }
-  .report-title { font-family:'Instrument Serif',serif; font-size:1.8rem; }
-  .report-subtitle { font-size:0.75rem; color:#6b6560; text-transform:uppercase; letter-spacing:0.1em; }
+  body { font-family:'Roboto',sans-serif; background:#f8f9fa; color:#202124; padding:40px; line-height:1.6; }
+  .report { max-width:800px; margin:0 auto; background:white; border-radius:12px; border:1px solid #dadce0; overflow:hidden; }
+  .report-header { padding:24px 32px; border-bottom:1px solid #dadce0; display:flex; align-items:center; justify-content:space-between; }
+  .report-title { font-family:'Poppins',sans-serif; font-size:1.8rem; font-weight:600; }
+  .report-subtitle { font-size:0.75rem; color:#5f6368; text-transform:uppercase; letter-spacing:0.1em; }
   .report-body { padding:24px 32px; }
-  h2 { font-size:0.8rem; text-transform:uppercase; letter-spacing:0.08em; color:#6b6560; margin:20px 0 8px; font-weight:600; }
+  h2 { font-size:0.8rem; text-transform:uppercase; letter-spacing:0.08em; color:#5f6368; margin:20px 0 8px; font-weight:600; }
   .frames { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:12px 0; }
-  .frames img { width:100%; border-radius:8px; border:1px solid #e8e4df; }
-  .frames .frame-label { font-size:0.7rem; color:#9c9590; text-align:center; margin-top:4px; }
-  .findings { padding:12px 16px; background:#faf9f7; border-radius:8px; margin:8px 0; }
+  .frames img { width:100%; border-radius:8px; border:1px solid #dadce0; }
+  .frames .frame-label { font-size:0.7rem; color:#80868b; text-align:center; margin-top:4px; }
+  .findings { padding:12px 16px; background:#f1f3f4; border-radius:8px; margin:8px 0; }
   .findings p { font-size:0.9rem; margin-bottom:8px; }
   .findings ul { padding-left:20px; }
   .findings li { font-size:0.85rem; margin-bottom:4px; }
   .meta-table { width:100%; border-collapse:collapse; margin:12px 0; }
-  .meta-table td { padding:6px 0; font-size:0.85rem; border-bottom:1px solid #f0ede9; }
-  .meta-table td:first-child { color:#6b6560; width:140px; }
+  .meta-table td { padding:6px 0; font-size:0.85rem; border-bottom:1px solid #e8eaed; }
+  .meta-table td:first-child { color:#5f6368; width:140px; }
   .confidence { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.75rem; font-weight:600; }
-  .report-footer { padding:16px 32px; border-top:1px solid #e8e4df; text-align:center; font-size:0.7rem; color:#9c9590; }
+  .report-footer { padding:16px 32px; border-top:1px solid #dadce0; text-align:center; font-size:0.7rem; color:#80868b; }
   @media print { body { padding:0; background:white; } .report { border:none; border-radius:0; } }
 </style></head><body>
 <div class="report">
   <div class="report-header">
     <div>
-      <div class="report-title">Gemi-fly</div>
+      <div class="report-title">Drone Copilot</div>
       <div class="report-subtitle">Mission Report</div>
     </div>
     <div style="text-align:right">
       <div style="font-size:0.85rem;font-weight:600">${escapeHtml(meta.target || 'Target')}</div>
-      <div style="font-size:0.7rem;color:#9c9590">${new Date().toLocaleDateString()}</div>
+      <div style="font-size:0.7rem;color:#80868b">${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</div>
     </div>
   </div>
   <div class="report-body">
+    ${result.object_identity ? `<div style="padding:14px 20px;background:linear-gradient(135deg,#e8f0fe,#f0f4ff);border-left:4px solid #4285f4;border-radius:0 8px 8px 0;margin-bottom:16px">
+      <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;color:#5f6368;margin-bottom:2px">Object Identified</div>
+      <div style="font-size:1.15rem;font-weight:600;color:#1a73e8">${escapeHtml(result.object_identity)}</div>
+    </div>` : ''}
+
     <h2>Captured Frames</h2>
     <div class="frames">
-      <div>
-        ${rd.acquisition_frame ? `<img src="data:image/jpeg;base64,${rd.acquisition_frame}">` : '<div style="background:#f6f4f1;aspect-ratio:4/3;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#9c9590">No frame</div>'}
+      ${rd.inspection_frames && rd.inspection_frames.length > 0 ? (() => {
+        let html = '';
+        html += '<div>' +
+          (rd.acquisition_frame ? `<img src="data:image/jpeg;base64,${rd.acquisition_frame}">` : '<div style="background:#f8f9fa;aspect-ratio:4/3;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#80868b">No frame</div>') +
+          '<div class="frame-label">Acquisition</div></div>';
+        for (const f of rd.inspection_frames) {
+          html += '<div>' +
+            `<img src="data:image/jpeg;base64,${f.base64}">` +
+            `<div class="frame-label">${escapeHtml(f.label)}</div></div>`;
+        }
+        return html;
+      })() : `<div>
+        ${rd.acquisition_frame ? `<img src="data:image/jpeg;base64,${rd.acquisition_frame}">` : '<div style="background:#f8f9fa;aspect-ratio:4/3;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#80868b">No frame</div>'}
         <div class="frame-label">Acquisition</div>
       </div>
       <div>
-        ${rd.inspection_frame ? `<img src="data:image/jpeg;base64,${rd.inspection_frame}">` : '<div style="background:#f6f4f1;aspect-ratio:4/3;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#9c9590">No frame</div>'}
+        ${rd.inspection_frame ? `<img src="data:image/jpeg;base64,${rd.inspection_frame}">` : '<div style="background:#f8f9fa;aspect-ratio:4/3;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#80868b">No frame</div>'}
         <div class="frame-label">Inspection</div>
-      </div>
+      </div>`}
     </div>
+
+    ${perAngleCards ? `<h2>Per-Angle Observations</h2>${perAngleCards}` : ''}
+
+    ${textChips ? `<h2>Visible Text &amp; Markings</h2>
+    <div style="padding:12px 16px;background:#f8f9fa;border-radius:8px;margin:8px 0;display:flex;flex-wrap:wrap;gap:2px">${textChips}</div>` : ''}
 
     <h2>Inspection Findings</h2>
     <div class="findings">
-      <p>${escapeHtml(result.description || 'No description available')}</p>
+      <p>${escapeHtml(result.description || 'No description available')}
+        ${result.condition ? ` <span class="confidence" style="background:${conditionColor.bg};color:${conditionColor.fg}">${escapeHtml(result.condition)}</span>` : ''}
+      </p>
       ${findings ? '<ul>' + findings + '</ul>' : ''}
-      ${result.confidence !== undefined ? `<div style="margin-top:8px"><span class="confidence" style="background:rgba(124,58,237,0.08);color:#7c3aed">${Math.round(result.confidence * 100)}% confidence</span></div>` : ''}
+      ${result.confidence !== undefined ? `<div style="margin-top:8px"><span class="confidence" style="background:rgba(161,66,244,0.06);color:#a142f4">${Math.round(result.confidence * 100)}% confidence</span></div>` : ''}
     </div>
+
+    <h2>Damage Assessment</h2>
+    ${damageSection}
 
     <h2>Mission Summary</h2>
     <table class="meta-table">
@@ -1173,7 +1391,7 @@ class Dashboard {
       <tr><td>Phases</td><td>${phases || '—'}</td></tr>
     </table>
   </div>
-  <div class="report-footer">Generated by Gemi-fly \u2014 Powered by Gemini</div>
+  <div class="report-footer">Generated by Drone Copilot \u2014 Gemini Live Agent Challenge</div>
 </div></body></html>`;
 
     win.document.write(html);

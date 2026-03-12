@@ -18,7 +18,7 @@ class ClientConfig(BaseSettings):
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     # ── Drone Hardware Thresholds ────────────────────────────────────────
-    MIN_MOVE_DISTANCE: int = 20
+    MIN_MOVE_DISTANCE: int = 10
     MAX_MOVE_DISTANCE: int = 200
     MIN_ROTATION: int = 10
     MAX_ROTATION: int = 360
@@ -26,41 +26,50 @@ class ClientConfig(BaseSettings):
     INTER_COMMAND_MOVE_DELAY: float = 2.0
     INTER_COMMAND_ROTATE_DELAY: float = 2.5
     APPROACH_MOVE_DELAY: float = 1.0
-    APPROACH_ROTATE_DELAY: float = 1.5
-    INSPECTION_MAX_APPROACH_STEPS: int = 25
-    INSPECTION_APPROACH_SIZE_THRESHOLD: float = 0.45
+    APPROACH_ROTATE_DELAY: float = 2.5
+    INSPECTION_MAX_APPROACH_STEPS: int = 15
+    INSPECTION_APPROACH_SIZE_THRESHOLD: float = 0.20
+    INSPECTION_MIN_FORWARD_STEPS: int = 2
     INSPECTION_PERCEPTION_TIMEOUT: float = 8.0
     INSPECTION_SCAN_STEP_DEGREES: int = 90
     INSPECTION_STAGNATION_LIMIT: int = 6
     INSPECTION_STAGNATION_THRESHOLD: float = 0.008
-    SEARCH_ROTATION_STEP: int = 45
+    SEARCH_ROTATION_STEP: int = 90
     SEARCH_PERCEPTION_TIMEOUT: float = 8.0
-    SEARCH_MIN_CONFIDENCE: float = 0.5
-    SEARCH_MAX_POSITIONS: int = 8
+    SEARCH_MIN_CONFIDENCE: float = 0.3
+    SEARCH_MAX_POSITIONS: int = 4
+    SEARCH_POST_DETECT_DELAY: float = 5.0  # seconds to pause after detection for Live API narration
     INSPECTION_FORWARD_FAR: int = 40
     INSPECTION_FORWARD_MEDIUM: int = 30
     INSPECTION_FORWARD_CLOSE: int = 20
-    INSPECTION_CENTER_THRESHOLD: float = 0.25
+    INSPECTION_CENTERING_THRESHOLD: float = 0.30
     INSPECTION_ROTATION_GAIN: float = 25.0
-    INSPECTION_STRAFE_ZONE_THRESHOLD: float = 0.15
-    INSPECTION_KP_LATERAL: float = 40.0
+    INSPECTION_NARRATION_INTERVAL: int = 2
+    INSPECTION_FINAL_CENTERING_MAX_STEPS: int = 5
+    INSPECTION_FINAL_CENTERING_H: float = 0.03
+    INSPECTION_FINAL_CENTERING_ROTATION_GAIN: float = 60.0
+    INSPECTION_FINAL_CENTERING_MAX_ROTATION: int = 15
+    INSPECTION_FINAL_CENTERING_V: float = 0.10
+    INSPECTION_KP_LATERAL: float = 50.0
     INSPECTION_MIN_STRAFE: int = 20
     INSPECTION_MAX_STRAFE: int = 50
     INSPECTION_POST_MOVE_CLAMP: int = 20
-    INSPECTION_ORBIT_RADIUS: int = 100
-    INSPECTION_ORBIT_ANGLE: int = 45
-    INSPECTION_ORBIT_SPEED: int = 20
+    INSPECTION_STRAFE_DISTANCE: int = 40
+    INSPECTION_STRAFE_ROTATION: int = 30
     INSPECTION_ORBIT_STABILIZE: float = 1.5
     INSPECTION_H_DEADBAND: float = 0.08
     INSPECTION_SEARCH_RECOVERY_DEG: int = 30
-    INSPECTION_V_DEADBAND: float = 0.15
-    INSPECTION_KP_VERTICAL: float = 30.0
-    INSPECTION_SKIP_VERTICAL_CM: int = 10
-    INSPECTION_MIN_VERTICAL: int = 20
+    INSPECTION_V_DEADBAND: float = 0.25
+    INSPECTION_KP_VERTICAL: float = 40.0
+    INSPECTION_SKIP_VERTICAL_CM: int = 15
+    INSPECTION_SKIP_ROTATION_DEG: float = 3.0
+    INSPECTION_SKIP_LATERAL_CM: float = 10.0
+    INSPECTION_MIN_VERTICAL: int = 10
     INSPECTION_MAX_VERTICAL: int = 40
     INSPECTION_MAX_BLIND_STEPS: int = 3
+    INSPECTION_MAX_RECOVERY_ATTEMPTS: int = 3
     INSPECTION_APPROACH_WATCHDOG_S: float = 120.0
-    HEARTBEAT_INTERVAL: int = 5
+    HEARTBEAT_INTERVAL: int = 10
     BATTERY_MIN_CONTINUE: int = 20
     BATTERY_MIN_TAKEOFF: int = 25
     TEMPERATURE_MAX: int = 80
@@ -76,10 +85,11 @@ class ClientConfig(BaseSettings):
     VIDEO_STREAM_RESTART_DELAY: float = 2.0  # seconds between off/on
 
     # ── Cost Reduction ─────────────────────────────────────────────────
-    IDLE_FRAME_INTERVAL: float = 5.0  # Seconds between perception frames when idle
+    IDLE_FRAME_INTERVAL: float = 10.0  # Seconds between perception frames when idle
     VAD_ENABLED: bool = True
-    VAD_AGGRESSIVENESS: int = 2  # 0-3, higher = more aggressive filtering
+    VAD_AGGRESSIVENESS: int = 1  # 0-3, higher = more aggressive filtering
     VAD_HANGOVER_CHUNKS: int = 10  # 100ms chunks to keep sending after speech stops
+    VAD_VIDEO_HANGOVER_S: float = 15.0  # Keep sending video for N seconds after last speech
 
     @field_validator("IDLE_FRAME_INTERVAL")
     @classmethod
@@ -97,6 +107,16 @@ class ClientConfig(BaseSettings):
     @classmethod
     def _validate_vad_hangover_chunks(cls, v: int) -> int:
         return max(0, v)
+
+    # ── Vertex AI / API Key ──────────────────────────────────────────────
+    USE_VERTEX_AI: bool = False
+    GCP_PROJECT: str = ""
+    GCP_LOCATION: str = "us-central1"
+
+    # ── Perception (generate_content for bounding box detection) ────────
+    GEMINI_API_KEY: str = ""
+    PERCEPTION_MODEL: str = "gemini-2.5-flash"
+    PERCEPTION_TEMPERATURE: float = 0.0
 
     # ── Gemini API ───────────────────────────────────────────────────────
     API_TIMEOUT_MS: int = 60000

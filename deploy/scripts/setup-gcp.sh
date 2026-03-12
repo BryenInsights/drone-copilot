@@ -21,6 +21,7 @@ gcloud services enable \
     containerregistry.googleapis.com \
     artifactregistry.googleapis.com \
     secretmanager.googleapis.com \
+    aiplatform.googleapis.com \
     --project "${PROJECT_ID}"
 
 echo "==> Creating service account: ${SA_NAME}..."
@@ -38,7 +39,8 @@ for ROLE in \
     roles/cloudbuild.builds.editor \
     roles/storage.admin \
     roles/iam.serviceAccountUser \
-    roles/secretmanager.secretAccessor; do
+    roles/secretmanager.secretAccessor \
+    roles/aiplatform.user; do
     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member="serviceAccount:${SA_EMAIL}" \
         --role="${ROLE}" \
@@ -48,6 +50,14 @@ done
 echo "==> Setting default Cloud Run region..."
 gcloud config set run/region "${REGION}"
 
+echo "==> Granting Vertex AI access to Cloud Run default service account..."
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')
+COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${COMPUTE_SA}" \
+    --role="roles/aiplatform.user" \
+    --quiet
+
 echo ""
 echo "==> GCP project setup complete!"
 echo "Project:         ${PROJECT_ID}"
@@ -55,5 +65,5 @@ echo "Region:          ${REGION}"
 echo "Service Account: ${SA_EMAIL}"
 echo ""
 echo "Next steps:"
-echo "  1. Store your Gemini API key:  gcloud secrets create gemini-api-key --data-file=- <<< 'YOUR_KEY'"
-echo "  2. Deploy the backend:         ./deploy.sh ${PROJECT_ID} YOUR_GEMINI_API_KEY"
+echo "  1. Deploy the backend:  ./deploy.sh ${PROJECT_ID}"
+echo "     (Uses Vertex AI — no API key needed, Cloud Run authenticates via GCP)"

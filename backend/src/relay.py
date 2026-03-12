@@ -26,7 +26,7 @@ from backend.src.models.messages import (
 logger = logging.getLogger(__name__)
 
 MAX_RECONNECT_ATTEMPTS = 3
-MAX_RECONNECT_CYCLES = 5
+MAX_RECONNECT_CYCLES = 15
 RECONNECT_DELAY_S = 1.0
 
 
@@ -136,7 +136,7 @@ class Relay:
             parts.append(
                 f"ACTIVE MISSION: {ctx.get('phase', 'unknown')} phase, "
                 f"target='{ctx.get('target', 'unknown')}'. "
-                f"You MUST call report_perception when you see frames with perception nudges. "
+                f"The mission controller handles perception autonomously. "
                 f"Do NOT call move_drone or rotate_drone — the mission controller is flying."
             )
         parts.append("Continue from where you left off.")
@@ -180,6 +180,7 @@ class Relay:
                     await self._session.send_text(msg.get("text", ""))
 
                 elif msg_type == "frames_with_prompt":
+                    # NOTE: Currently unused — reports use Flash API instead
                     frames_b64: list[str] = msg.get("frames", [])
                     frames_bytes = [base64.b64decode(f) for f in frames_b64]
                     prompt = msg.get("prompt", "")
@@ -198,12 +199,12 @@ class Relay:
                 raise
             except json.JSONDecodeError:
                 logger.warning("Received non-JSON message from client")
-            except Exception:
+            except Exception as e:
                 logger.exception("Error in send loop")
                 await self._ws_send(
                     ErrorMsg(
                         code="send_error",
-                        message="Error processing client message",
+                        message=f"Error processing client message: {e}",
                         recoverable=True,
                     )
                 )

@@ -271,6 +271,14 @@ class DashboardBroadcaster:
             "timestamp": time.time(),
         })
 
+    def send_report_data_sync(self, data: dict) -> None:
+        """Fire-and-forget report data broadcast from sync thread."""
+        self._broadcast_fire_and_forget({
+            "type": "report_data",
+            "data": data,
+            "timestamp": time.time(),
+        })
+
     def send_frame_sync(self, jpeg_base64: str) -> None:
         """Fire-and-forget frame broadcast from sync thread."""
         self._broadcast_fire_and_forget({

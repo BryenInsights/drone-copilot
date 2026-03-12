@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import threading
 import time
@@ -14,6 +15,7 @@ from client.src.mission.inspection import InspectionMission
 from client.src.mission.perception_bridge import PerceptionBridge
 from client.src.models.mission import MissionStatus
 from client.src.models.tool_calls import (
+    DashboardPerception,
     HoverParams,
     LandParams,
     MoveDroneParams,
@@ -27,6 +29,7 @@ from client.src.models.tool_calls import (
 if TYPE_CHECKING:
     from client.src.backend_client import BackendClient
     from client.src.drone.controller import DroneController
+    from client.src.perception.visual import VisualPerceptionClient
     from client.src.video.frame_streamer import FrameStreamer
 
 logger = logging.getLogger(__name__)
@@ -60,10 +63,12 @@ class ToolHandler:
         controller: DroneController,
         backend_client: BackendClient,
         frame_streamer: FrameStreamer | None = None,
+        visual_client: VisualPerceptionClient | None = None,
     ) -> None:
         self._controller = controller
         self._backend = backend_client
         self._streamer = frame_streamer
+        self._visual_client = visual_client
         self._config = controller.config
 
         # Mission state
@@ -79,6 +84,7 @@ class ToolHandler:
         self._on_status_change: list[Any] = []
         self._on_command_log: list[Any] = []
         self._on_perception_change: list[Any] = []
+        self._on_report_data: list[Any] = []
 
         # Watchdog state reference (set by main.py)
         self._watchdog_state: dict | None = None
@@ -106,6 +112,15 @@ class ToolHandler:
     def add_perception_listener(self, callback: Any) -> None:
         """Register a callback for perception updates (for dashboard)."""
         self._on_perception_change.append(callback)
+
+    def add_report_data_listener(self, callback: Any) -> None:
+        """Register a callback for report data broadcast (for dashboard)."""
+        self._on_report_data.append(callback)
+
+    def abort_mission_from_dashboard(self) -> None:
+        """Abort mission from dashboard — non-blocking (no thread join)."""
+        if self._inspection:
+            self._inspection.abort()
 
     @property
     def is_mission_active(self) -> bool:
@@ -188,8 +203,8 @@ class ToolHandler:
                         "success": False,
                         "error": "mission_active",
                         "message": "Inspection mission is controlling the drone. "
-                        "Use report_perception to guide the approach, "
-                        "or say 'stop' to cancel the mission.",
+                        "The mission handles perception autonomously. "
+                        "Say 'stop' to cancel the mission.",
                     }
                 # Clamp forward distance after recent inspection completion
                 if (
@@ -220,8 +235,8 @@ class ToolHandler:
                         "success": False,
                         "error": "mission_active",
                         "message": "Inspection mission is controlling the drone. "
-                        "Use report_perception to guide the approach, "
-                        "or say 'stop' to cancel the mission.",
+                        "The mission handles perception autonomously. "
+                        "Say 'stop' to cancel the mission.",
                     }
                 result = self._controller.rotate(
                     params.direction, params.degrees,
@@ -300,37 +315,9 @@ class ToolHandler:
             params.aspects,
         )
 
-        # Create async helpers for the mission thread
+        # Create async helper for the mission thread
         async def send_text(text: str) -> None:
             await self._backend.send_text(text)
-
-        async def send_video(frame_b64: str) -> None:
-            await self._backend.send_video(frame_b64)
-
-        async def send_frame_with_prompt(frames: list[bytes], prompt: str) -> None:
-            await self._backend.send_frames_with_prompt(frames, prompt)
-
-        async def send_inspection_frames(
-            frames: list[bytes],
-            labels: list[str],
-            target: str,
-            aspects: str | None,
-        ) -> None:
-            prompt = (
-                f"I just captured {len(frames)} inspection frames of "
-                f"'{target}' from different angles: "
-                f"{', '.join(labels)}. "
-                f"Please provide a detailed verbal assessment of what you see."
-            )
-            if aspects:
-                prompt += f" Focus especially on: {aspects}."
-            prompt += (
-                " Describe the object's condition, notable features, "
-                "and any issues or observations."
-            )
-            await self._backend.send_frames_with_prompt(
-                frames, prompt,
-            )
 
         # Create mission
         self._inspection = InspectionMission(
@@ -338,12 +325,12 @@ class ToolHandler:
             frame_streamer=self._streamer,
             config=self._config,
             perception_bridge=self._perception_bridge,
+            visual_client=self._visual_client,
             send_text_fn=send_text,
-            send_frames_fn=send_inspection_frames,
-            send_video_fn=send_video,
-            send_frame_with_prompt_fn=send_frame_with_prompt,
             on_status_change=self._notify_status_change,
             on_command_log=self._broadcast_command_log,
+            on_perception_broadcast=self._broadcast_perception,
+            on_ai_activity=self._broadcast_ai_activity_from_mission,
         )
         if self._loop:
             self._inspection.set_event_loop(self._loop)
@@ -387,13 +374,16 @@ class ToolHandler:
                 logger.info(
                     "Inspection mission completed: %s", mission.status,
                 )
+
+                if mission.status == MissionStatus.COMPLETE:
+                    self._assemble_and_broadcast_report(target_description)
         except Exception:
             logger.exception("Inspection mission thread error")
             if self._controller.state.is_flying:
                 self._controller.emergency_land()
         finally:
             # Clear mission context regardless of outcome
-            if self._loop:
+            if self._loop and not self._loop.is_closed():
                 asyncio.run_coroutine_threadsafe(
                     self._backend.send_mission_context(None),
                     self._loop,
@@ -417,6 +407,90 @@ class ToolHandler:
             )
 
     # ------------------------------------------------------------------
+    # Report assembly
+    # ------------------------------------------------------------------
+
+    def _assemble_and_broadcast_report(self, target_description: str) -> None:
+        """Build report_data dict from mission artifacts and broadcast."""
+        if not self._inspection:
+            return
+
+        report = self._inspection.report
+
+        # Encode frames to base64
+        acquisition_b64 = (
+            base64.b64encode(report.acquisition_frame).decode("ascii")
+            if report.acquisition_frame else None
+        )
+
+        # Front close-up as the primary inspection_frame (backward compat)
+        inspection_b64 = None
+        inspection_frames_list = []
+        for frame_bytes, label in report.inspection_frames:
+            b64 = base64.b64encode(frame_bytes).decode("ascii")
+            inspection_frames_list.append({"base64": b64, "label": label})
+            if inspection_b64 is None:
+                inspection_b64 = b64  # first frame = front close-up
+
+        # Structured report from Flash
+        ir = report.inspection_report
+        if ir is not None:
+            inspection_result = {
+                "description": ir.description,
+                "condition": ir.condition,
+                "confidence": ir.confidence,
+                "findings": ir.findings,
+                "summary": ir.summary,
+                "object_identity": ir.object_identity,
+                "visible_text": ir.visible_text or [],
+                "per_angle": (
+                    [{"angle": ao.angle, "observation": ao.observation}
+                     for ao in ir.per_angle]
+                    if ir.per_angle else []
+                ),
+                "damage_details": ir.damage_details or [],
+            }
+        else:
+            inspection_result = {
+                "description": "Inspection report not available.",
+            }
+
+        # Duration
+        duration = None
+        if report.started_at and report.finished_at:
+            duration = report.finished_at - report.started_at
+
+        battery_end = self._controller.state.battery
+
+        data = {
+            "acquisition_frame": acquisition_b64,
+            "inspection_frame": inspection_b64,
+            "inspection_frames": inspection_frames_list,
+            "inspection_result": inspection_result,
+            "metadata": {
+                "target": target_description,
+                "duration_seconds": duration,
+                "battery_end": battery_end,
+                "phases_completed": report.phases_completed,
+            },
+        }
+
+        logger.info(
+            "Report assembled: %d inspection frames, condition=%s",
+            len(inspection_frames_list),
+            inspection_result.get("condition", "n/a"),
+        )
+        self._broadcast_report_data(data)
+
+    def _broadcast_report_data(self, data: dict) -> None:
+        """Notify report data listeners."""
+        for cb in self._on_report_data:
+            try:
+                cb(data)
+            except Exception:
+                logger.warning("Report data listener error", exc_info=True)
+
+    # ------------------------------------------------------------------
     # Perception
     # ------------------------------------------------------------------
 
@@ -424,7 +498,8 @@ class ToolHandler:
         self, params: ReportPerceptionParams,
     ) -> dict:
         """Feed perception result to perception bridge for active missions."""
-        self._broadcast_perception(params)
+        dashboard_perc = DashboardPerception.from_report_perception(params)
+        self._broadcast_perception(dashboard_perc)
 
         if not self._perception_bridge.active and not self.is_mission_active:
             return {
@@ -485,14 +560,22 @@ class ToolHandler:
             except Exception:
                 logger.warning("Tool activity listener error", exc_info=True)
 
-    def _broadcast_perception(self, params: ReportPerceptionParams) -> None:
+    def _broadcast_perception(self, perception: DashboardPerception) -> None:
         """Notify listeners about perception data (for dashboard overlay)."""
-        data = params.model_dump()
+        data = perception.model_dump()
         for cb in self._on_perception_change:
             try:
                 cb(data)
             except Exception:
                 logger.warning("Perception listener error", exc_info=True)
+
+    def _broadcast_ai_activity_from_mission(self, data: dict) -> None:
+        """Notify listeners about AI activity from mission (for dashboard API tracking)."""
+        for cb in self._on_tool_activity:
+            try:
+                cb(data)
+            except Exception:
+                logger.warning("AI activity listener error", exc_info=True)
 
     def _broadcast_command_log(self, message: str) -> None:
         """Notify listeners about a drone command (for dashboard mission log)."""

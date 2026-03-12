@@ -2,6 +2,7 @@
 
 import enum
 import logging
+import time
 
 import webrtcvad
 
@@ -37,6 +38,7 @@ class VoiceActivityDetector:
         self._hangover_max = hangover_max
         self._hangover_remaining = 0
         self._state = _State.IDLE
+        self._last_speech_time: float = 0.0
 
     def should_forward(self, pcm_bytes: bytes) -> bool:
         """Return True if the audio chunk should be forwarded to Gemini.
@@ -61,6 +63,7 @@ class VoiceActivityDetector:
                 logger.debug("VAD: %s -> ACTIVE", self._state.value)
             self._state = _State.ACTIVE
             self._hangover_remaining = self._hangover_max
+            self._last_speech_time = time.time()
             return True
 
         if self._hangover_remaining > 0:
@@ -77,3 +80,17 @@ class VoiceActivityDetector:
             logger.debug("VAD: %s -> IDLE", self._state.value)
             self._state = _State.IDLE
         return False
+
+    @property
+    def last_speech_time(self) -> float:
+        return self._last_speech_time
+
+    def reset(self) -> None:
+        """Reset state to IDLE and clear hangover counter."""
+        if self._state != _State.IDLE or self._hangover_remaining > 0:
+            logger.debug(
+                "VAD: reset (%s, hangover=%d) -> IDLE",
+                self._state.value, self._hangover_remaining,
+            )
+        self._state = _State.IDLE
+        self._hangover_remaining = 0

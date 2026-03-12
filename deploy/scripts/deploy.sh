@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Automated deployment script for drone-copilot backend to Cloud Run.
-# Usage: ./deploy.sh <PROJECT_ID> <GEMINI_API_KEY>
+# Uses Vertex AI (no API key needed — Cloud Run authenticates via GCP).
+#
+# Usage: ./deploy.sh <PROJECT_ID>
 
 set -euo pipefail
 
-PROJECT_ID="${1:?Usage: deploy.sh <PROJECT_ID> <GEMINI_API_KEY>}"
-GEMINI_API_KEY="${2:?Usage: deploy.sh <PROJECT_ID> <GEMINI_API_KEY>}"
+PROJECT_ID="${1:?Usage: deploy.sh <PROJECT_ID>}"
 
 SERVICE_NAME="drone-copilot-backend"
 REGION="${REGION:-us-central1}"
@@ -28,7 +29,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --cpu=1 \
     --memory=512Mi \
     --port=8080 \
-    --set-env-vars="GEMINI_API_KEY=${GEMINI_API_KEY}" \
+    --set-env-vars="USE_VERTEX_AI=true,GCP_PROJECT=${PROJECT_ID},GCP_LOCATION=${REGION}" \
     --allow-unauthenticated
 
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \

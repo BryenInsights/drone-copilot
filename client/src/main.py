@@ -43,7 +43,7 @@ def _create_drone(config: ClientConfig):
             config.DJITELLOPY_RETRY_COUNT,
         )
         drone = Tello()
-        drone.RETRY_COUNT = config.DJITELLOPY_RETRY_COUNT
+        drone.retry_count = config.DJITELLOPY_RETRY_COUNT
         return drone
 
 
@@ -63,6 +63,8 @@ async def _audio_send_loop(
         try:
             pcm_bytes = await audio_capture.queue.get()
             if audio_playback.is_playing:
+                if vad is not None:
+                    vad.reset()
                 continue  # Discard echo — copilot is speaking
             if vad is not None and not vad.should_forward(pcm_bytes):
                 continue  # Silence — skip sending
@@ -99,14 +101,34 @@ async def _response_watchdog(backend_client, watchdog_state) -> None:
 async def _video_send_loop(
     frame_streamer,
     backend_client,
+    vad=None,
+    video_hangover_s: float = 15.0,
+    idle_interval: float = 10.0,
+    mission_active_check=None,
 ) -> None:
-    """Send video frames to backend at configured rate (~1 FPS)."""
+    """Send video frames to backend at configured idle interval.
+
+    When VAD is provided, only sends frames within video_hangover_s seconds
+    of the last detected speech — saves API cost during silence.
+    """
     while True:
         try:
+            # Mission gate: skip frames while inspection mission is running
+            # (mission uses Flash API for perception — Live API frames are wasted)
+            if mission_active_check is not None and mission_active_check():
+                await asyncio.sleep(2.0)
+                continue
+
+            # VAD gate: skip sending frames during extended silence
+            # Poll quickly (1s) so we react fast when speech resumes
+            if vad is not None and time.time() - vad.last_speech_time > video_hangover_s:
+                await asyncio.sleep(1.0)
+                continue
+
             frame_b64 = frame_streamer.get_perception_frame()
             if frame_b64 is not None:
                 await backend_client.send_video(frame_b64, time.time())
-            await asyncio.sleep(0.1)  # Check 10x/sec, rate limiting is in streamer
+            await asyncio.sleep(idle_interval)
         except asyncio.CancelledError:
             break
         except Exception:
@@ -160,9 +182,22 @@ async def main() -> None:
         )
         logger.info("VAD enabled (aggressiveness=%d, hangover=%d chunks)",
                      config.VAD_AGGRESSIVENESS, config.VAD_HANGOVER_CHUNKS)
+    # Visual perception client (generate_content for bounding box detection)
+    from client.src.perception.visual import VisualPerceptionClient
+
+    visual_client = VisualPerceptionClient(
+        model=config.PERCEPTION_MODEL,
+        api_key=config.GEMINI_API_KEY,
+        use_vertex_ai=config.USE_VERTEX_AI,
+        gcp_project=config.GCP_PROJECT,
+        gcp_location=config.GCP_LOCATION,
+        temperature=config.PERCEPTION_TEMPERATURE,
+        timeout_ms=config.API_TIMEOUT_MS,
+        max_retries=config.MAX_API_RETRIES,
+    )
     frame_capture = FrameCapture(drone, config)
     frame_streamer = FrameStreamer(frame_capture, config)
-    tool_handler = ToolHandler(controller, backend_client, frame_streamer)
+    tool_handler = ToolHandler(controller, backend_client, frame_streamer, visual_client)
 
     # Set event loop on tool handler for mission thread async calls
     loop = asyncio.get_running_loop()
@@ -203,12 +238,20 @@ async def main() -> None:
         backend_ws_url=config.BACKEND_URL,
     )
 
-    # Register dashboard command handler for mic toggle
+    # Register dashboard command handler for mic toggle and mission control
     async def dashboard_command_handler(msg: dict) -> None:
         action = msg.get("action")
         if action == "mic_toggle":
             new_muted = audio_capture.toggle_muted()
             await broadcaster.broadcast_mic_state(new_muted)
+        elif action == "abort_mission":
+            logger.info("Dashboard: abort mission requested")
+            tool_handler.abort_mission_from_dashboard()
+            controller.hover()
+        elif action == "emergency_land":
+            logger.info("Dashboard: emergency land requested")
+            tool_handler.abort_mission_from_dashboard()
+            controller.emergency_land()
 
     dashboard_app.state.command_handler = dashboard_command_handler
 
@@ -231,20 +274,33 @@ async def main() -> None:
 
     # Hook broadcaster into tool handler for tool activity and mission status
     tool_handler.add_tool_activity_listener(broadcaster.send_ai_activity_sync)
-    tool_handler.add_status_change_listener(
-        lambda mission: broadcaster.send_status_sync({
+
+    def _build_dashboard_status(mission) -> dict:
+        status_val = (
+            mission.status.value if hasattr(mission.status, "value") else str(mission.status)
+        )
+        _STATE_MAP = {
+            "searching": "EXECUTING", "approaching": "EXECUTING", "inspecting": "EXECUTING",
+            "idle": "IDLE", "complete": "COMPLETE", "aborted": "ERROR",
+        }
+        _PHASE_MAP = {"searching": "search", "approaching": "approach", "inspecting": "inspect"}
+        return {
             "mission_id": str(mission.id),
             "type": mission.type.value if hasattr(mission.type, "value") else str(mission.type),
-            "status": mission.status.value
-            if hasattr(mission.status, "value")
-            else str(mission.status),
+            "status": status_val,
+            "state": _STATE_MAP.get(status_val, "IDLE"),
+            "phase": _PHASE_MAP.get(status_val),
             "target": mission.target_description or "",
-        })
+        }
+
+    tool_handler.add_status_change_listener(
+        lambda mission: broadcaster.send_status_sync(_build_dashboard_status(mission))
     )
     tool_handler.add_command_log_listener(
         lambda msg: broadcaster.send_log_sync("COMMAND", msg)
     )
     tool_handler.add_perception_listener(broadcaster.send_perception_sync)
+    tool_handler.add_report_data_listener(broadcaster.send_report_data_sync)
 
     # Emergency landing function
     def emergency_shutdown(reason: str = "signal") -> None:
@@ -345,7 +401,14 @@ async def main() -> None:
                 name="audio_send",
             ),
             asyncio.create_task(
-                _video_send_loop(frame_streamer, backend_client), name="video_send",
+                _video_send_loop(
+                    frame_streamer, backend_client,
+                    vad=vad,
+                    video_hangover_s=config.VAD_VIDEO_HANGOVER_S,
+                    idle_interval=config.IDLE_FRAME_INTERVAL,
+                    mission_active_check=lambda: tool_handler.is_mission_active,
+                ),
+                name="video_send",
             ),
             asyncio.create_task(backend_client.receive_loop(), name="backend_receive"),
             asyncio.create_task(

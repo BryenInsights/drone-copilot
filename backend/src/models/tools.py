@@ -108,9 +108,9 @@ def build_tool_declarations() -> list[types.Tool]:
             name="report_perception",
             description=(
                 "Report your visual perception of the target. "
-                "During active missions: REQUIRED — drives navigation. Call promptly when asked. "
-                "Outside missions: if response shows mission_active=false, stop calling this "
-                "and use move_drone/rotate_drone instead. "
+                "During active missions: NOT used — the mission controller handles perception "
+                "autonomously. Outside missions: if response shows mission_active=false, stop "
+                "calling this and use move_drone/rotate_drone instead. "
                 "Use these calibration anchors for relative_size: "
                 "0.03-0.08 = tiny/far (3m+), 0.08-0.15 = small/medium-far (1.5-3m), "
                 "0.15-0.25 = medium/close (0.8-1.5m), 0.25-0.50 = large/very close (<0.8m). "

@@ -125,9 +125,18 @@ class DroneController:
             logger.warning("Takeoff rejected: %s", result.reason)
             return {"success": False, "error": "safety_check_failed", "message": result.reason}
 
-        self.executor.execute_command(self.drone.takeoff)
-        self.state.takeoff_time = time.time()
+        # Pause heartbeat and drain stale UDP responses to prevent interleaving
+        self.executor.pause_heartbeat()
+        time.sleep(0.5)
+        try:
+            executed = self.executor.execute_command(self.drone.takeoff)
+        finally:
+            self.executor.resume_heartbeat()
 
+        if not executed:
+            return {"success": False, "error": "command_skipped", "message": "Takeoff command was skipped"}
+
+        self.state.takeoff_time = time.time()
         self.poll_telemetry()
         logger.info("Takeoff complete, altitude=%.0fcm", self.state.altitude)
         return {"success": True, "result": "takeoff_complete"}
@@ -135,8 +144,14 @@ class DroneController:
     def land(self) -> dict:
         """Execute graceful landing with retry."""
         self._commanded_landing = True
+        # Pause heartbeat and drain stale UDP responses to prevent interleaving
+        self.executor.pause_heartbeat()
+        time.sleep(0.5)
         try:
-            self.executor.execute_command(self.drone.land)
+            executed = self.executor.execute_command(self.drone.land)
+            if not executed:
+                self._commanded_landing = False
+                return {"success": False, "error": "command_skipped", "message": "Land command was skipped"}
             self.state.takeoff_time = None
             self.poll_telemetry()
             self._commanded_landing = False
@@ -153,6 +168,8 @@ class DroneController:
                 self._commanded_landing = False
                 logger.error("Land retry failed: %s", e2)
                 return {"success": False, "error": "land_failed", "message": str(e2)}
+        finally:
+            self.executor.resume_heartbeat()
 
     def emergency_land(self) -> dict:
         """Emergency landing — FR-007: land() → raw SDK land → motor stop.
@@ -166,41 +183,48 @@ class DroneController:
             return {"success": True, "result": "already_landed"}
 
         logger.warning("EMERGENCY LAND initiated")
+        self._commanded_landing = True
+        self.executor.pause_heartbeat()
         self.executor.cancel_commands()
 
-        # Check time-since-takeoff — landing within 5s of takeoff is unreliable
-        if self.state.takeoff_time is not None:
-            elapsed = time.time() - self.state.takeoff_time
-            if elapsed < 5.0:
-                wait = 5.0 - elapsed
-                logger.warning("Waiting %.1fs (takeoff was <5s ago) before emergency land", wait)
-                time.sleep(wait)
-
-        # Layer 1: graceful land
         try:
-            self.drone.land()
-            self.state.takeoff_time = None
-            logger.info("Emergency: graceful land succeeded")
-            return {"success": True, "result": "emergency_landed"}
-        except Exception:
-            logger.error("Emergency: graceful land failed, trying raw land")
+            # Check time-since-takeoff — landing within 5s of takeoff is unreliable
+            if self.state.takeoff_time is not None:
+                elapsed = time.time() - self.state.takeoff_time
+                if elapsed < 5.0:
+                    wait = 5.0 - elapsed
+                    logger.warning("Waiting %.1fs (takeoff was <5s ago) before emergency land", wait)
+                    time.sleep(wait)
 
-        # Layer 2: raw SDK land
-        try:
-            self.drone.land()
-            self.state.takeoff_time = None
-            return {"success": True, "result": "emergency_landed_raw"}
-        except Exception:
-            logger.error("Emergency: raw land failed, motor stop")
+            # Layer 1: graceful land
+            try:
+                self.drone.land()
+                self.state.takeoff_time = None
+                logger.info("Emergency: graceful land succeeded")
+                return {"success": True, "result": "emergency_landed"}
+            except Exception:
+                logger.error("Emergency: graceful land failed, trying raw land")
 
-        # Layer 3: motor stop
-        try:
-            self.drone.emergency()
-            self.state.takeoff_time = None
-            return {"success": True, "result": "emergency_motor_stop"}
-        except Exception as e:
-            logger.critical("Emergency: ALL landing methods failed: %s", e)
-            return {"success": False, "error": "emergency_failed", "message": str(e)}
+            # Layer 2: raw SDK land
+            try:
+                self.drone.land()
+                self.state.takeoff_time = None
+                return {"success": True, "result": "emergency_landed_raw"}
+            except Exception:
+                logger.error("Emergency: raw land failed, motor stop")
+
+            # Layer 3: motor stop
+            try:
+                self.drone.emergency()
+                self.state.takeoff_time = None
+                return {"success": True, "result": "emergency_motor_stop"}
+            except Exception as e:
+                logger.critical("Emergency: ALL landing methods failed: %s", e)
+                return {"success": False, "error": "emergency_failed", "message": str(e)}
+        finally:
+            self._commanded_landing = False
+            self.executor.reset_cancellation()
+            self.executor.resume_heartbeat()
 
     def move(
         self, direction: str, distance_cm: int, *, delay_override: float | None = None,
@@ -235,10 +259,18 @@ class DroneController:
             delay_override if delay_override is not None
             else self.config.INTER_COMMAND_MOVE_DELAY
         )
-        self.executor.execute_command(
-            lambda: method(clamped),
-            delay=delay,
-        )
+        try:
+            self.executor.execute_command(
+                lambda: method(clamped),
+                delay=delay,
+            )
+        except Exception as e:
+            logger.error("Move %s %dcm failed: %s", direction, clamped, e)
+            if "Auto land" in str(e):
+                logger.warning("Drone auto-landed — marking as not flying")
+                self.state.is_flying = False
+                self.state.takeoff_time = None
+            return {"success": False, "error": "move_failed", "message": str(e)}
         self.poll_telemetry()
         logger.info("Moved %s %dcm", direction, clamped)
         return {"success": True, "result": f"moved_{direction}_{clamped}cm"}
@@ -271,10 +303,18 @@ class DroneController:
             delay_override if delay_override is not None
             else self.config.INTER_COMMAND_ROTATE_DELAY
         )
-        self.executor.execute_command(
-            lambda: method(clamped),
-            delay=delay,
-        )
+        try:
+            self.executor.execute_command(
+                lambda: method(clamped),
+                delay=delay,
+            )
+        except Exception as e:
+            logger.error("Rotate %s %d° failed: %s", direction, clamped, e)
+            if "Auto land" in str(e):
+                logger.warning("Drone auto-landed — marking as not flying")
+                self.state.is_flying = False
+                self.state.takeoff_time = None
+            return {"success": False, "error": "rotate_failed", "message": str(e)}
         self.poll_telemetry()
         logger.info("Rotated %s %d°", direction, clamped)
         return {"success": True, "result": f"rotated_{direction}_{clamped}deg"}
@@ -308,10 +348,14 @@ class DroneController:
             delay_override if delay_override is not None
             else self.config.INTER_COMMAND_MOVE_DELAY
         )
-        self.executor.execute_command(
-            lambda: self.drone.curve_xyz_speed(x1, y1, z1, x2, y2, z2, speed),
-            delay=delay,
-        )
+        try:
+            self.executor.execute_command(
+                lambda: self.drone.curve_xyz_speed(x1, y1, z1, x2, y2, z2, speed),
+                delay=delay,
+            )
+        except Exception as e:
+            logger.error("Curve failed: %s", e)
+            return {"success": False, "error": "curve_failed", "message": str(e)}
         self.poll_telemetry()
         logger.info(
             "Curve mid=(%d,%d,%d) end=(%d,%d,%d) speed=%d",
