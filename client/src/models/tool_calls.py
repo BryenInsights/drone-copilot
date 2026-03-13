@@ -62,12 +62,20 @@ class SetSpeedParams(BaseModel):
     speed_cm_per_sec: int = Field(ge=10, le=100)
 
 
+class ViewingAngle(StrEnum):
+    FRONT = "front"
+    BEHIND = "behind"
+    LEFT = "left"
+    RIGHT = "right"
+
+
 class StartInspectionParams(BaseModel):
     """Parameters for start_inspection tool call."""
 
     target_description: str = Field(min_length=1)
     aspects: str | None = None
     needs_search: bool = False
+    viewing_angle: ViewingAngle = ViewingAngle.FRONT
 
 
 class ReportPerceptionParams(BaseModel):

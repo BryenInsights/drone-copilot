@@ -196,6 +196,14 @@ def build_tool_declarations() -> list[types.Tool]:
                             "The drone will perform an autonomous 360-degree scan to find it."
                         ),
                     ),
+                    "viewing_angle": types.Schema(
+                        type=types.Type.STRING,
+                        description=(
+                            "Direction to view the target from: 'front' (default), "
+                            "'behind', 'left', or 'right'. Use when the user specifies "
+                            "a viewing direction like 'from behind' or 'from the left'."
+                        ),
+                    ),
                 },
                 required=["target_description"],
             ),

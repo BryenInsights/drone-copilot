@@ -1011,7 +1011,7 @@ class Dashboard {
     const missionStatus = data.status || null;
 
     this._currentState = state;
-    this._missionActive = ['searching', 'approaching', 'inspecting'].includes(missionStatus);
+    this._missionActive = ['searching', 'approaching', 'repositioning', 'inspecting'].includes(missionStatus);
     this._currentPhase = phase;
     if (target) this._currentTarget = target;
 

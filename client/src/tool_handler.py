@@ -338,7 +338,10 @@ class ToolHandler:
         # Launch in background thread (daemon=False per lesson C2)
         self._mission_thread = threading.Thread(
             target=self._run_inspection,
-            args=(params.target_description, params.aspects, params.needs_search),
+            args=(
+                params.target_description, params.aspects,
+                params.needs_search, params.viewing_angle,
+            ),
             name="inspection-mission",
             daemon=False,
         )
@@ -364,12 +367,14 @@ class ToolHandler:
         target_description: str,
         aspects: str | None,
         needs_search: bool = False,
+        viewing_angle: str = "front",
     ) -> None:
         """Run inspection mission in background thread."""
         try:
             if self._inspection:
                 mission = self._inspection.run(
                     target_description, aspects, needs_search=needs_search,
+                    viewing_angle=viewing_angle,
                 )
                 logger.info(
                     "Inspection mission completed: %s", mission.status,

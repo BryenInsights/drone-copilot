@@ -22,6 +22,7 @@ class MissionStatus(StrEnum):
     IDLE = "idle"
     SEARCHING = "searching"
     APPROACHING = "approaching"
+    REPOSITIONING = "repositioning"
     INSPECTING = "inspecting"
     COMPLETE = "complete"
     ABORTED = "aborted"
@@ -61,9 +62,14 @@ class MissionStateMachine:
             MissionStatus.COMPLETE,
         },
         MissionStatus.APPROACHING: {
+            MissionStatus.REPOSITIONING,
             MissionStatus.INSPECTING,
             MissionStatus.ABORTED,
             MissionStatus.COMPLETE,
+        },
+        MissionStatus.REPOSITIONING: {
+            MissionStatus.INSPECTING,
+            MissionStatus.ABORTED,
         },
         MissionStatus.INSPECTING: {
             MissionStatus.COMPLETE,

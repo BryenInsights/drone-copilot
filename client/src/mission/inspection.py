@@ -199,6 +199,7 @@ class InspectionMission:
         target_description: str,
         aspects: str | None = None,
         needs_search: bool = False,
+        viewing_angle: str = "front",
     ) -> Mission:
         """Execute the full inspection mission (called from background thread).
 
@@ -353,11 +354,19 @@ class InspectionMission:
             self._final_centering(target_description)
             self._check_abort()
 
+            # --- L-maneuver: reposition for requested viewing angle ---
+            if viewing_angle != "front":
+                sm.transition(MissionStatus.REPOSITIONING)
+                self._notify_status()
+                self._run_l_maneuver(target_description, viewing_angle)
+                self._check_abort()
+                self._report.phases_completed.append("reposition")
+
             # --- Phase 3: Lateral strafe inspection ---
             sm.transition(MissionStatus.INSPECTING)
             self._notify_status()
 
-            self._run_inspection_phase(target_description, aspects)
+            self._run_inspection_phase(target_description, aspects, viewing_angle)
 
             self._report.phases_completed.append("inspect")
             self._report.finished_at = time.time()
@@ -1089,11 +1098,149 @@ class InspectionMission:
         logger.info("Final centering done")
 
     # ------------------------------------------------------------------
+    # L-Maneuver: reposition to requested viewing angle
+    # ------------------------------------------------------------------
+
+    def _run_l_maneuver(self, target_description: str, viewing_angle: str) -> None:
+        """Execute L-shaped maneuver to reposition drone to the requested viewing angle.
+
+        Geometry:
+          behind → strafe right, move forward, rotate CW 180°
+          left   → strafe right, move forward, rotate CW 90°
+          right  → strafe left, move forward, rotate CCW 90°
+        """
+        cfg = self._config
+        strafe = cfg.LMANEUVER_STRAFE_DISTANCE
+        forward = cfg.LMANEUVER_FORWARD_DISTANCE
+        stabilize = cfg.INSPECTION_ORBIT_STABILIZE
+
+        # Determine maneuver parameters based on viewing angle
+        if viewing_angle == "behind":
+            strafe_dir, rotate_dir, rotate_deg = "right", "clockwise", 180
+        elif viewing_angle == "left":
+            strafe_dir, rotate_dir, rotate_deg = "right", "clockwise", 90
+        elif viewing_angle == "right":
+            strafe_dir, rotate_dir, rotate_deg = "left", "counter_clockwise", 90
+        else:
+            logger.warning("Unknown viewing angle '%s' — skipping L-maneuver", viewing_angle)
+            return
+
+        self._send_text_sync(
+            f"Repositioning to view the target from {viewing_angle}. "
+            f"Executing L-maneuver: strafe {strafe_dir} {strafe}cm, "
+            f"forward {forward}cm, then rotate {rotate_deg} degrees."
+        )
+
+        # Step 1: Strafe sideways to clear the target
+        self._check_abort()
+        self._controller.move(strafe_dir, strafe)
+        self._log_command(f"Move {strafe_dir} {strafe}cm (L-maneuver: clear target)")
+        self._interruptible_sleep(stabilize)
+
+        # Step 2: Move forward to pass the target
+        self._check_abort()
+        self._controller.move("forward", forward)
+        self._log_command(f"Move forward {forward}cm (L-maneuver: pass target)")
+        self._interruptible_sleep(stabilize)
+
+        # Step 3: Rotate to face the target from the new angle
+        self._check_abort()
+        self._controller.rotate(rotate_dir, rotate_deg)
+        self._log_command(f"Rotate {rotate_dir} {rotate_deg}° (L-maneuver: face target)")
+        self._interruptible_sleep(stabilize)
+
+        # Step 4: Re-acquire the target
+        self._reacquire_after_l_maneuver(target_description)
+
+    def _reacquire_after_l_maneuver(self, target_description: str) -> None:
+        """Re-acquire target after L-maneuver using expanding sweep search.
+
+        First checks current view. If not visible, alternates CW/CCW sweeps
+        with increasing angle: 20°, 20°, 40°, 40°, 60°, 60° (configurable).
+        On success, runs _final_centering. On failure, proceeds with best-effort.
+        """
+        cfg = self._config
+        sweep_deg = cfg.LMANEUVER_REACQUIRE_SWEEP_DEG
+        max_sweeps = cfg.LMANEUVER_REACQUIRE_MAX_SWEEPS
+
+        if not self._visual_client or not self._streamer:
+            logger.warning("No visual client/streamer — skipping re-acquisition")
+            return
+
+        # Check current view first
+        frame = self._streamer.get_fresh_perception_frame_bytes(
+            timeout=3.0, min_new_frames=30,
+        )
+        if frame:
+            try:
+                resp = self._visual_client.detect(frame, target_description)
+                self._broadcast_ai_activity("reacquire_detect")
+                if resp.target_visible and resp.confidence >= cfg.SEARCH_MIN_CONFIDENCE:
+                    logger.info("Target re-acquired immediately after L-maneuver")
+                    self._send_text_sync("Target re-acquired. Centering for inspection.")
+                    self._final_centering(target_description)
+                    return
+            except RateLimitError:
+                logger.warning("Rate limited during re-acquisition — proceeding with sweep")
+
+        # Expanding sweep: alternate CW/CCW with increasing angles
+        self._send_text_sync("Target not visible — sweeping to re-acquire.")
+        net_rotation = 0  # Track cumulative rotation to restore heading on failure
+
+        for i in range(max_sweeps):
+            self._check_abort()
+            # Alternate directions: even=CW, odd=CCW
+            # Increasing angle: (i // 2 + 1) * sweep_deg
+            angle = ((i // 2) + 1) * sweep_deg
+            direction = "clockwise" if i % 2 == 0 else "counter_clockwise"
+
+            self._controller.rotate(direction, angle)
+            self._log_command(f"Rotate {direction} {angle}° (re-acquire sweep {i + 1})")
+            if direction == "clockwise":
+                net_rotation += angle
+            else:
+                net_rotation -= angle
+            self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
+
+            frame = self._streamer.get_fresh_perception_frame_bytes(
+                timeout=3.0, min_new_frames=30,
+            )
+            if not frame:
+                continue
+
+            try:
+                resp = self._visual_client.detect(frame, target_description)
+                self._broadcast_ai_activity("reacquire_detect")
+            except RateLimitError:
+                continue
+
+            if resp.target_visible and resp.confidence >= cfg.SEARCH_MIN_CONFIDENCE:
+                logger.info(
+                    "Target re-acquired at sweep %d (net rotation %d°)",
+                    i + 1, net_rotation,
+                )
+                self._send_text_sync("Target re-acquired. Centering for inspection.")
+                self._final_centering(target_description)
+                return
+
+        # Exhausted all sweeps — proceed with best effort
+        logger.warning(
+            "Re-acquisition failed after %d sweeps (net rotation %d°) — "
+            "proceeding with inspection from current position",
+            max_sweeps, net_rotation,
+        )
+        self._send_text_sync(
+            "Could not re-acquire target after repositioning. "
+            "Proceeding with inspection from current position."
+        )
+
+    # ------------------------------------------------------------------
     # Phase 3: Strafe + rotation inspection
     # ------------------------------------------------------------------
 
     def _run_inspection_phase(
         self, target_description: str, aspects: str | None,
+        viewing_angle: str = "front",
     ) -> None:
         """Capture frames from 3 perspectives using lateral strafe + rotation."""
         cfg = self._config
@@ -1103,23 +1250,33 @@ class InspectionMission:
         captured_frames: list[bytes] = []
         captured_labels: list[str] = []
 
+        # Compute labels based on viewing angle
+        if viewing_angle != "front":
+            front_label = f"{viewing_angle} close-up"
+            right_label = f"{viewing_angle} right-angled view"
+            left_label = f"{viewing_angle} left-angled view"
+        else:
+            front_label = "front close-up"
+            right_label = "right-angled view"
+            left_label = "left-angled view"
+
         # 1. Front close-up — capture at current position
         self._check_abort()
         self._interruptible_sleep(stabilize)
         frame = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
         if frame is not None:
             captured_frames.append(frame)
-            captured_labels.append("front close-up")
-            self._report.inspection_frames.append((frame, "front close-up"))
-            logger.info("Captured front close-up (%d bytes)", len(frame))
+            captured_labels.append(front_label)
+            self._report.inspection_frames.append((frame, front_label))
+            logger.info("Captured %s (%d bytes)", front_label, len(frame))
         else:
-            logger.warning("No frame for front close-up")
+            logger.warning("No frame for %s", front_label)
 
         # 2. Right angled view: strafe right → rotate to face target → capture → return
         self._check_abort()
         self._send_text_sync(f"Strafing right {strafe_dist}cm for angled view.")
         self._controller.move("right", strafe_dist)
-        self._log_command(f"Move right {strafe_dist}cm (inspection: right-angled view)")
+        self._log_command(f"Move right {strafe_dist}cm (inspection: {right_label})")
         self._controller.rotate("counter_clockwise", strafe_rot)
         self._log_command(f"Rotate CCW {strafe_rot}° (face target)")
         self._interruptible_sleep(stabilize)
@@ -1127,11 +1284,11 @@ class InspectionMission:
         frame = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
         if frame is not None:
             captured_frames.append(frame)
-            captured_labels.append("right-angled view")
-            self._report.inspection_frames.append((frame, "right-angled view"))
-            logger.info("Captured right-angled view (%d bytes)", len(frame))
+            captured_labels.append(right_label)
+            self._report.inspection_frames.append((frame, right_label))
+            logger.info("Captured %s (%d bytes)", right_label, len(frame))
         else:
-            logger.warning("No frame for right-angled view")
+            logger.warning("No frame for %s", right_label)
 
         # Return to center from right
         self._check_abort()
@@ -1145,7 +1302,7 @@ class InspectionMission:
         self._check_abort()
         self._send_text_sync(f"Strafing left {strafe_dist}cm for opposite angled view.")
         self._controller.move("left", strafe_dist)
-        self._log_command(f"Move left {strafe_dist}cm (inspection: left-angled view)")
+        self._log_command(f"Move left {strafe_dist}cm (inspection: {left_label})")
         self._controller.rotate("clockwise", strafe_rot)
         self._log_command(f"Rotate CW {strafe_rot}° (face target)")
         self._interruptible_sleep(stabilize)
@@ -1153,11 +1310,11 @@ class InspectionMission:
         frame = self._streamer.get_fresh_perception_frame_bytes(timeout=3.0)
         if frame is not None:
             captured_frames.append(frame)
-            captured_labels.append("left-angled view")
-            self._report.inspection_frames.append((frame, "left-angled view"))
-            logger.info("Captured left-angled view (%d bytes)", len(frame))
+            captured_labels.append(left_label)
+            self._report.inspection_frames.append((frame, left_label))
+            logger.info("Captured %s (%d bytes)", left_label, len(frame))
         else:
-            logger.warning("No frame for left-angled view")
+            logger.warning("No frame for %s", left_label)
 
         # Return to center from left
         self._check_abort()
