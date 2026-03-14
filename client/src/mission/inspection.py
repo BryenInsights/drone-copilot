@@ -1006,7 +1006,9 @@ class InspectionMission:
     def _final_centering(self, target_description: str) -> None:
         """Tight centering adjustments after approach, before orbit inspection.
 
-        Only lateral and vertical corrections — no forward movement.
+        Strafe-only corrections (no rotation) to avoid parallax oscillation
+        at close range. Based on gemini-fly's proven approach controller pattern:
+        if the offset is too small to strafe, it's "good enough" — skip it.
         """
         cfg = self._config
         max_steps = cfg.INSPECTION_FINAL_CENTERING_MAX_STEPS
@@ -1039,34 +1041,32 @@ class InspectionMission:
             needs_correction = False
 
             try:
+                # Horizontal: strafe only, never rotate at close range (parallax overshoot)
                 if abs(h_off) > cfg.INSPECTION_FINAL_CENTERING_H:
-                    strafe_cm = int(abs(h_off) * cfg.INSPECTION_KP_LATERAL)
-                    if strafe_cm >= cfg.INSPECTION_MIN_STRAFE:
-                        # Large offset -> strafe
-                        strafe_cm = min(strafe_cm, cfg.INSPECTION_MAX_STRAFE)
+                    raw_strafe = abs(h_off) * cfg.INSPECTION_KP_LATERAL
+                    if raw_strafe >= cfg.INSPECTION_FINAL_CENTERING_SKIP_CM:
+                        strafe_cm = max(
+                            cfg.INSPECTION_FINAL_CENTERING_MIN_STRAFE,
+                            min(int(raw_strafe), cfg.INSPECTION_FINAL_CENTERING_MAX_STRAFE),
+                        )
                         direction = "right" if h_off > 0 else "left"
                         logger.info(
                             "Final centering: strafe %s %dcm (h=%.3f)",
                             direction, strafe_cm, h_off,
                         )
                         self._controller.move(direction, strafe_cm)
-                        self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
-                    else:
-                        # Small offset -> rotation (finer than min strafe)
-                        rot_deg = int(abs(h_off) * cfg.INSPECTION_FINAL_CENTERING_ROTATION_GAIN)
-                        rot_deg = max(
-                            cfg.MIN_ROTATION,
-                            min(rot_deg, cfg.INSPECTION_FINAL_CENTERING_MAX_ROTATION),
-                        )
-                        rot_dir = "clockwise" if h_off > 0 else "counter_clockwise"
-                        self._controller.rotate(rot_dir, rot_deg)
-                        cw_label = "CW" if h_off > 0 else "CCW"
                         self._log_command(
-                            f"Rotate {cw_label} {rot_deg}\u00b0 (fine centering, h={h_off:.3f})"
+                            f"Strafe {direction} {strafe_cm}cm (fine centering, h={h_off:.3f})"
                         )
-                        self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
-                    needs_correction = True
+                        self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
+                        needs_correction = True
+                    else:
+                        logger.info(
+                            "Final centering: h=%.3f too small (%.1fcm < skip %.1f)",
+                            h_off, raw_strafe, cfg.INSPECTION_FINAL_CENTERING_SKIP_CM,
+                        )
 
+                # Vertical: independent correction
                 if abs(v_off) > cfg.INSPECTION_FINAL_CENTERING_V:
                     vert_cm = int(abs(v_off) * cfg.INSPECTION_KP_VERTICAL)
                     vert_cm = max(

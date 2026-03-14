@@ -304,10 +304,13 @@ class DroneController:
             else self.config.INTER_COMMAND_ROTATE_DELAY
         )
         try:
-            self.executor.execute_command(
-                lambda: method(clamped),
-                delay=delay,
-            )
+            if clamped > 180:
+                first_half = clamped // 2
+                second_half = clamped - first_half
+                self.executor.execute_command(lambda f=first_half: method(f), delay=delay)
+                self.executor.execute_command(lambda s=second_half: method(s), delay=delay)
+            else:
+                self.executor.execute_command(lambda: method(clamped), delay=delay)
         except Exception as e:
             logger.error("Rotate %s %d° failed: %s", direction, clamped, e)
             if "Auto land" in str(e):

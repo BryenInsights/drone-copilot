@@ -109,12 +109,10 @@ class CommandExecutor:
             # Non-blocking acquire — skip if a command is in progress (lesson C5)
             if self._lock.acquire(blocking=False):
                 try:
-                    self.drone.query_battery()
-                    logger.debug("Heartbeat: battery query sent")
-                except (ValueError, TypeError):
-                    pass  # UDP response mismatch — harmless
+                    self.drone.send_rc_control(0, 0, 0, 0)
+                    logger.debug("Heartbeat: RC keepalive sent")
                 except Exception:
-                    logger.warning("Heartbeat: failed to query drone", exc_info=True)
+                    logger.warning("Heartbeat: keepalive failed", exc_info=True)
                 finally:
                     self._lock.release()
 

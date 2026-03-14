@@ -555,7 +555,7 @@ class MissionLog {
     } else {
       // New speaker or no active entry — create fresh
       this._clearVoiceAccumulation();
-      this.addEntry('VOICE', `[${speaker}] ${text}`, timestamp, true);
+      this.addEntry(speaker, text, timestamp, true);
       this._lastVoiceEl = this._container.lastElementChild;
       this._lastVoiceSpeaker = speaker;
     }

@@ -321,6 +321,7 @@ body {
 /* ── Info Panels ───────────────────────────────────── */
 .info-panels {
   display: flex; flex-direction: column; gap: 16px;
+  overflow: hidden;
 }
 .panel {
   background: var(--bg-surface);
@@ -484,10 +485,10 @@ body {
 
 /* Mission Log panel */
 .log-panel {
-  flex: 1; min-height: 200px; display: flex; flex-direction: column;
+  flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
 }
 .log-container {
-  flex: 1; overflow-y: auto; max-height: 360px;
+  flex: 1; overflow-y: auto; min-height: 0;
   display: flex; flex-direction: column; gap: 6px;
 }
 .log-entry {
@@ -512,6 +513,8 @@ body {
 .log-entry.WARNING { border-left-color: var(--amber); }
 .log-entry.ERROR { border-left-color: var(--red); }
 .log-entry.VOICE { border-left-color: var(--green); }
+.log-entry.USER { border-left-color: var(--blue); }
+.log-entry.COPILOT { border-left-color: var(--green); }
 .log-entry.TOOL_CALL { border-left-color: var(--teal); }
 .log-time {
   font-family: var(--font-mono);
@@ -532,6 +535,8 @@ body {
 .log-level.WARNING { background: var(--amber-bg); color: var(--amber); }
 .log-level.ERROR { background: var(--red-bg); color: var(--red); }
 .log-level.VOICE { background: var(--green-bg); color: var(--green); }
+.log-level.USER { background: var(--blue-bg); color: var(--blue); }
+.log-level.COPILOT { background: var(--green-bg); color: var(--green); }
 .log-level.TOOL_CALL { background: var(--teal-bg); color: var(--teal); }
 .log-message {
   flex: 1;
