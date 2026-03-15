@@ -67,7 +67,7 @@ resource "google_cloud_run_v2_service" "backend" {
 
       startup_probe {
         http_get {
-          path = "/healthz"
+          path = "/health"
         }
         initial_delay_seconds = 5
         period_seconds        = 10
@@ -75,7 +75,7 @@ resource "google_cloud_run_v2_service" "backend" {
 
       liveness_probe {
         http_get {
-          path = "/healthz"
+          path = "/health"
         }
         period_seconds = 30
       }

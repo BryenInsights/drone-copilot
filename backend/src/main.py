@@ -23,8 +23,8 @@ app.add_middleware(
 config = BackendConfig()
 
 
-@app.get("/healthz")
-async def healthz():
+@app.get("/health")
+async def health():
     """Health check endpoint for load balancer / Cloud Run."""
     return {"status": "healthy"}
 

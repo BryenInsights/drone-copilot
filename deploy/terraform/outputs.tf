@@ -10,5 +10,5 @@ output "websocket_url" {
 
 output "health_url" {
   description = "Health check URL"
-  value       = "${google_cloud_run_v2_service.backend.uri}/healthz"
+  value       = "${google_cloud_run_v2_service.backend.uri}/health"
 }
