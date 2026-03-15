@@ -44,33 +44,32 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 Drone Copilot uses a **split architecture** to overcome a key hardware constraint: the DJI Tello drone creates its own WiFi network, which means the laptop controlling it loses internet access. The solution is a cloud backend.
 
 ```mermaid
-graph TD
-    subgraph Local["Local Machine (MacBook)"]
-        Drone["DJI Tello Drone\n(WiFi control + 720p video)"]
-        Audio["Mic & Speaker\n(16kHz capture / 24kHz playback)\nVAD filtering"]
-        Perception["Visual Perception\n(Gemini Flash)"]
+graph LR
+    subgraph Local["Local Client (MacBook)"]
+        direction TB
+        Drone["DJI Tello Drone\nWiFi · 720p video"]
+        Audio["Mic & Speaker\n16kHz in · 24kHz out · VAD"]
+        Perception["Visual Perception\nGemini Flash"]
         Mission["Mission Controller\nSearch · Inspect · Approach · Orbit"]
         Dashboard["Web Dashboard\nlocalhost:8081"]
     end
 
-    subgraph Cloud["Google Cloud"]
-        subgraph CloudRun["Cloud Run (Backend)"]
+    subgraph GCP["Google Cloud"]
+        direction TB
+        subgraph CR["Cloud Run — Backend"]
             Relay["FastAPI WebSocket Relay"]
-            Session["Gemini Live API Session\n(Vertex AI)\nBidirectional audio · Video · Tool calls · Session resumption"]
+            Session["Gemini Live API · Vertex AI\nBidirectional audio · Video analysis\nTool calls · Session resumption"]
         end
-        Flash["Vertex AI — Gemini Flash\nBounding box detection\nInspection report generation"]
+        Flash["Gemini Flash · Vertex AI\nBounding box detection\nInspection report generation"]
     end
 
-    Browser["Browser\nLive video · Telemetry · Transcript · Mission status"]
+    Browser["Browser\nLive video · Telemetry\nTranscript · Mission status"]
 
-    Drone -- "video frames" --> Perception
-    Drone -- "video + control" --> Mission
-    Audio -- "audio stream" --> Relay
-    Relay -- "voice + tool calls" --> Audio
-    Perception -- "direct API call" --> Flash
-    Mission -- "drone commands" --> Drone
-    Relay <-- "WebSocket\naudio + video" --> Session
-    Local <-- "WebSocket" --> CloudRun
+    Mission <-->|"commands / telemetry"| Drone
+    Audio -->|"audio + video frames"| Relay
+    Relay -->|"voice + tool calls"| Audio
+    Relay --- Session
+    Perception -->|"direct API calls"| Flash
     Dashboard --> Browser
 ```
 
