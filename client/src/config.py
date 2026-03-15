@@ -18,7 +18,7 @@ class ClientConfig(BaseSettings):
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     # ── Drone Hardware Thresholds ────────────────────────────────────────
-    MIN_MOVE_DISTANCE: int = 10
+    MIN_MOVE_DISTANCE: int = 20
     MAX_MOVE_DISTANCE: int = 200
     MIN_ROTATION: int = 10
     MAX_ROTATION: int = 360
@@ -71,11 +71,12 @@ class ClientConfig(BaseSettings):
     INSPECTION_MAX_RECOVERY_ATTEMPTS: int = 3
     INSPECTION_APPROACH_WATCHDOG_S: float = 120.0
 
-    # L-Maneuver (viewing angle repositioning)
+    # L-Maneuver (deprecated — replaced by Flash-guided repositioning)
     LMANEUVER_STRAFE_DISTANCE: int = 80
     LMANEUVER_FORWARD_DISTANCE: int = 100
     LMANEUVER_REACQUIRE_MAX_SWEEPS: int = 6
     LMANEUVER_REACQUIRE_SWEEP_DEG: int = 20
+
     HEARTBEAT_INTERVAL: int = 10
     BATTERY_MIN_CONTINUE: int = 20
     BATTERY_MIN_TAKEOFF: int = 25

@@ -217,6 +217,15 @@ class InspectionMission:
         self._abort_event.clear()
         self._init_debug_dir()
 
+        # Phase 0: Flash planning — extract the searchable object from the target description
+        searchable_object = target_description
+        if self._visual_client:
+            try:
+                plan = self._visual_client.plan_inspection(target_description)
+                searchable_object = plan.searchable_object
+            except Exception:
+                logger.warning("Planning failed — using full description", exc_info=True)
+
         try:
             # Ensure drone is flying (needed for both search and approach paths)
             if not self._controller.state.is_flying:
@@ -260,9 +269,9 @@ class InspectionMission:
             if needs_search:
                 sm.transition(MissionStatus.SEARCHING)
                 self._notify_status()
-                logger.info("Starting search phase for '%s'", target_description)
+                logger.info("Starting search phase for '%s'", searchable_object)
 
-                found = self._run_search_phase(target_description)
+                found = self._run_search_phase(searchable_object)
                 if not found:
                     self._send_text_sync(
                         f"Could not find '{target_description}' after a full 360-degree scan. "
@@ -293,7 +302,7 @@ class InspectionMission:
                 if verify_frame:
                     try:
                         verify_resp = self._visual_client.detect(
-                            verify_frame, target_description,
+                            verify_frame, searchable_object,
                         )
                         self._broadcast_ai_activity("search_detect")
                     except RateLimitError:
@@ -317,7 +326,7 @@ class InspectionMission:
                         )
                         sm.transition(MissionStatus.SEARCHING)
                         self._notify_status()
-                        found = self._run_search_phase(target_description)
+                        found = self._run_search_phase(searchable_object)
                         if not found:
                             self._send_text_sync(
                                 f"Could not find '{target_description}' after a "
@@ -345,28 +354,20 @@ class InspectionMission:
                 "Starting approach phase. I will use visual perception to guide "
                 "the drone toward the target automatically.",
             )
-            self._run_approach_phase(target_description)
+            self._run_approach_phase(searchable_object)
 
             self._check_abort()
             self._report.phases_completed.append("approach")
 
             # --- Final centering before inspection ---
-            self._final_centering(target_description)
+            self._final_centering(searchable_object)
             self._check_abort()
-
-            # --- L-maneuver: reposition for requested viewing angle ---
-            if viewing_angle != "front":
-                sm.transition(MissionStatus.REPOSITIONING)
-                self._notify_status()
-                self._run_l_maneuver(target_description, viewing_angle)
-                self._check_abort()
-                self._report.phases_completed.append("reposition")
 
             # --- Phase 3: Lateral strafe inspection ---
             sm.transition(MissionStatus.INSPECTING)
             self._notify_status()
 
-            self._run_inspection_phase(target_description, aspects, viewing_angle)
+            self._run_inspection_phase(target_description, aspects)
 
             self._report.phases_completed.append("inspect")
             self._report.finished_at = time.time()
@@ -623,7 +624,7 @@ class InspectionMission:
         cfg = self._config
 
         # EMA smoothing state
-        smoothed_size: float | None = None
+        smoothed_model_size: float | None = None
         smoothed_h_off: float | None = None
         smoothed_v_off: float | None = None
         alpha = 0.5
@@ -713,7 +714,7 @@ class InspectionMission:
                         )
                         if self._run_search_phase(target_description):
                             recovery_attempts = 0
-                            smoothed_size = None
+                            smoothed_model_size = None
                             smoothed_h_off = None
                             smoothed_v_off = None
                             last_forward_size = None
@@ -739,30 +740,39 @@ class InspectionMission:
                 continue
 
             # Compute offsets from bounding box
-            h_off, v_off, rel_size = compute_offsets(response.box_2d)
+            h_off, v_off, box_size = compute_offsets(response.box_2d)
+
+            # Use model-estimated relative_size; fall back to box_size if model returned 0
+            model_size = response.relative_size
+            if response.target_visible and model_size == 0.0 and box_size > 0.0:
+                logger.info(
+                    "Model returned relative_size=0 — falling back to box_size=%.3f",
+                    box_size,
+                )
+                model_size = box_size
 
             logger.info(
-                "Box offsets: h=%.3f v=%.3f size=%.3f (box=%s)",
-                h_off, v_off, rel_size, response.box_2d,
+                "Box offsets: h=%.3f v=%.3f box_size=%.3f model_size=%.3f (box=%s)",
+                h_off, v_off, box_size, model_size, response.box_2d,
             )
 
             # --- EMA smoothing ---
-            if smoothed_size is None:
-                smoothed_size = rel_size
+            if smoothed_model_size is None:
+                smoothed_model_size = model_size
                 smoothed_h_off = h_off
                 smoothed_v_off = v_off
             else:
-                smoothed_size = alpha * rel_size + (1 - alpha) * smoothed_size
+                smoothed_model_size = alpha * model_size + (1 - alpha) * smoothed_model_size
                 smoothed_h_off = alpha * h_off + (1 - alpha) * smoothed_h_off
                 smoothed_v_off = alpha * v_off + (1 - alpha) * smoothed_v_off
 
             logger.info(
-                "EMA: size=%.3f h=%.2f v=%.2f",
-                smoothed_size, smoothed_h_off, smoothed_v_off,
+                "EMA: model_size=%.3f box_size=%.3f h=%.2f v=%.2f",
+                smoothed_model_size, box_size, smoothed_h_off, smoothed_v_off,
             )
 
             # Broadcast perception to dashboard overlay
-            self._broadcast_approach_perception(response, h_off, v_off, rel_size)
+            self._broadcast_approach_perception(response, h_off, v_off, model_size)
 
             # --- Compute-then-execute ---
 
@@ -829,9 +839,9 @@ class InspectionMission:
             # 3C: Compute forward distance (gated by centering + path_clear)
             forward_cm = 0
             if abs(smoothed_h_off) < cfg.INSPECTION_CENTERING_THRESHOLD:
-                if smoothed_size < 0.15:
+                if smoothed_model_size < 0.15:
                     forward_cm = cfg.INSPECTION_FORWARD_FAR
-                elif smoothed_size < 0.25:
+                elif smoothed_model_size < 0.25:
                     forward_cm = cfg.INSPECTION_FORWARD_MEDIUM
                 else:
                     forward_cm = cfg.INSPECTION_FORWARD_CLOSE
@@ -839,12 +849,12 @@ class InspectionMission:
             # 3D: Exit check (before executing)
             if (
                 forward_step_count >= cfg.INSPECTION_MIN_FORWARD_STEPS
-                and smoothed_size >= cfg.INSPECTION_APPROACH_SIZE_THRESHOLD
+                and smoothed_model_size >= cfg.INSPECTION_APPROACH_SIZE_THRESHOLD
             ):
                 logger.info(
-                    "Target close enough (smoothed_size=%.3f >= %.3f, "
+                    "Target close enough (smoothed_model_size=%.3f >= %.3f, "
                     "forward_steps=%d)",
-                    smoothed_size, cfg.INSPECTION_APPROACH_SIZE_THRESHOLD,
+                    smoothed_model_size, cfg.INSPECTION_APPROACH_SIZE_THRESHOLD,
                     forward_step_count,
                 )
                 self._send_text_sync(
@@ -859,8 +869,8 @@ class InspectionMission:
                 h_type, h_dir, h_amount = h_cmd
                 if h_type == "strafe":
                     logger.info(
-                        "Strafe centering: %s %dcm (smoothed_h=%.2f, size=%.3f)",
-                        h_dir, h_amount, smoothed_h_off, smoothed_size,
+                        "Strafe centering: %s %dcm (smoothed_h=%.2f, model_size=%.3f)",
+                        h_dir, h_amount, smoothed_h_off, smoothed_model_size,
                     )
                     self._controller.move(h_dir, h_amount)
                     self._log_command(
@@ -899,12 +909,12 @@ class InspectionMission:
 
             if forward_cm > 0:
                 logger.info(
-                    "Moving forward %dcm (smoothed_size=%.3f)",
-                    forward_cm, smoothed_size,
+                    "Moving forward %dcm (smoothed_model_size=%.3f)",
+                    forward_cm, smoothed_model_size,
                 )
                 result = self._controller.move("forward", forward_cm)
                 self._log_command(
-                    f"Forward {forward_cm}cm (size: {smoothed_size:.3f})"
+                    f"Forward {forward_cm}cm (model_size: {smoothed_model_size:.3f})"
                 )
                 if not result.get("success"):
                     if not self._controller.state.is_flying:
@@ -925,8 +935,8 @@ class InspectionMission:
                 moves_done.append(f"moved forward {forward_cm}cm")
 
                 # Stagnation detection (only on forward steps)
-                if last_forward_size is not None and smoothed_size is not None:
-                    growth = smoothed_size - last_forward_size
+                if last_forward_size is not None and smoothed_model_size is not None:
+                    growth = smoothed_model_size - last_forward_size
                     if growth < cfg.INSPECTION_STAGNATION_THRESHOLD:
                         consecutive_no_growth += 1
                         logger.info(
@@ -947,24 +957,24 @@ class InspectionMission:
                             break
                     else:
                         consecutive_no_growth = 0
-                last_forward_size = smoothed_size
+                last_forward_size = smoothed_model_size
 
             moved_this_step = bool(moves_done)
 
             if not moves_done:
                 logger.info(
-                    "No movement this step (h=%.2f, fwd=%d)",
-                    smoothed_h_off, forward_cm,
+                    "No movement this step (h=%.2f, model_size=%.3f, fwd=%d)",
+                    smoothed_h_off, smoothed_model_size, forward_cm,
                 )
 
             # Narrate progress periodically
             if moves_done and step % cfg.INSPECTION_NARRATION_INTERVAL == 0:
                 # Build size description
-                if smoothed_size < 0.10:
+                if smoothed_model_size < 0.10:
                     size_desc = "still far out"
-                elif smoothed_size < 0.15:
+                elif smoothed_model_size < 0.15:
                     size_desc = "getting closer"
-                elif smoothed_size < 0.20:
+                elif smoothed_model_size < 0.20:
                     size_desc = "fairly close"
                 else:
                     size_desc = "nearly in position"
@@ -996,8 +1006,8 @@ class InspectionMission:
             )
 
         # Store final size for post-inspection move clamping
-        if self._mission and smoothed_size is not None:
-            self._mission.final_relative_size = smoothed_size
+        if self._mission and smoothed_model_size is not None:
+            self._mission.final_relative_size = smoothed_model_size
 
     # ------------------------------------------------------------------
     # Final centering (between approach and inspection)
@@ -1015,6 +1025,8 @@ class InspectionMission:
         logger.info("Starting final centering (max %d steps)", max_steps)
 
         from client.src.perception.visual import compute_offsets
+
+        consecutive_failures = 0
 
         for i in range(max_steps):
             self._check_abort()
@@ -1054,10 +1066,23 @@ class InspectionMission:
                             "Final centering: strafe %s %dcm (h=%.3f)",
                             direction, strafe_cm, h_off,
                         )
-                        self._controller.move(direction, strafe_cm)
+                        result = self._controller.move(direction, strafe_cm)
                         self._log_command(
                             f"Strafe {direction} {strafe_cm}cm (fine centering, h={h_off:.3f})"
                         )
+                        if not result.get("success"):
+                            if not self._controller.state.is_flying:
+                                raise RuntimeError("Drone auto-landed during final centering")
+                            consecutive_failures += 1
+                            logger.warning(
+                                "Final centering strafe failed (%d/2): %s",
+                                consecutive_failures, result,
+                            )
+                            if consecutive_failures >= 2:
+                                logger.warning("2 consecutive centering failures — breaking out")
+                                break
+                            continue
+                        consecutive_failures = 0
                         self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
                         needs_correction = True
                     else:
@@ -1078,9 +1103,24 @@ class InspectionMission:
                         "Final centering: %s %dcm (v=%.3f)",
                         vert_dir, vert_cm, v_off,
                     )
-                    self._controller.move(vert_dir, vert_cm)
+                    result = self._controller.move(vert_dir, vert_cm)
+                    if not result.get("success"):
+                        if not self._controller.state.is_flying:
+                            raise RuntimeError("Drone auto-landed during final centering")
+                        consecutive_failures += 1
+                        logger.warning(
+                            "Final centering vertical move failed (%d/2): %s",
+                            consecutive_failures, result,
+                        )
+                        if consecutive_failures >= 2:
+                            logger.warning("2 consecutive centering failures — breaking out")
+                            break
+                        continue
+                    consecutive_failures = 0
                     self._interruptible_sleep(cfg.APPROACH_MOVE_DELAY)
                     needs_correction = True
+            except RuntimeError:
+                raise
             except Exception:
                 logger.warning(
                     "Final centering move failed at step %d",
@@ -1097,150 +1137,8 @@ class InspectionMission:
         self._send_text_sync("Final centering complete.")
         logger.info("Final centering done")
 
-    # ------------------------------------------------------------------
-    # L-Maneuver: reposition to requested viewing angle
-    # ------------------------------------------------------------------
-
-    def _run_l_maneuver(self, target_description: str, viewing_angle: str) -> None:
-        """Execute L-shaped maneuver to reposition drone to the requested viewing angle.
-
-        Geometry:
-          behind → strafe right, move forward, rotate CW 180°
-          left   → strafe right, move forward, rotate CW 90°
-          right  → strafe left, move forward, rotate CCW 90°
-        """
-        cfg = self._config
-        strafe = cfg.LMANEUVER_STRAFE_DISTANCE
-        forward = cfg.LMANEUVER_FORWARD_DISTANCE
-        stabilize = cfg.INSPECTION_ORBIT_STABILIZE
-
-        # Determine maneuver parameters based on viewing angle
-        if viewing_angle == "behind":
-            strafe_dir, rotate_dir, rotate_deg = "right", "clockwise", 180
-        elif viewing_angle == "left":
-            strafe_dir, rotate_dir, rotate_deg = "right", "clockwise", 90
-        elif viewing_angle == "right":
-            strafe_dir, rotate_dir, rotate_deg = "left", "counter_clockwise", 90
-        else:
-            logger.warning("Unknown viewing angle '%s' — skipping L-maneuver", viewing_angle)
-            return
-
-        self._send_text_sync(
-            f"Repositioning to view the target from {viewing_angle}. "
-            f"Executing L-maneuver: strafe {strafe_dir} {strafe}cm, "
-            f"forward {forward}cm, then rotate {rotate_deg} degrees."
-        )
-
-        # Step 1: Strafe sideways to clear the target
-        self._check_abort()
-        self._controller.move(strafe_dir, strafe)
-        self._log_command(f"Move {strafe_dir} {strafe}cm (L-maneuver: clear target)")
-        self._interruptible_sleep(stabilize)
-
-        # Step 2: Move forward to pass the target
-        self._check_abort()
-        self._controller.move("forward", forward)
-        self._log_command(f"Move forward {forward}cm (L-maneuver: pass target)")
-        self._interruptible_sleep(stabilize)
-
-        # Step 3: Rotate to face the target from the new angle
-        self._check_abort()
-        self._controller.rotate(rotate_dir, rotate_deg)
-        self._log_command(f"Rotate {rotate_dir} {rotate_deg}° (L-maneuver: face target)")
-        self._interruptible_sleep(stabilize)
-
-        # Step 4: Re-acquire the target
-        self._reacquire_after_l_maneuver(target_description)
-
-    def _reacquire_after_l_maneuver(self, target_description: str) -> None:
-        """Re-acquire target after L-maneuver using expanding sweep search.
-
-        First checks current view. If not visible, alternates CW/CCW sweeps
-        with increasing angle: 20°, 20°, 40°, 40°, 60°, 60° (configurable).
-        On success, runs _final_centering. On failure, proceeds with best-effort.
-        """
-        cfg = self._config
-        sweep_deg = cfg.LMANEUVER_REACQUIRE_SWEEP_DEG
-        max_sweeps = cfg.LMANEUVER_REACQUIRE_MAX_SWEEPS
-
-        if not self._visual_client or not self._streamer:
-            logger.warning("No visual client/streamer — skipping re-acquisition")
-            return
-
-        # Check current view first
-        frame = self._streamer.get_fresh_perception_frame_bytes(
-            timeout=3.0, min_new_frames=30,
-        )
-        if frame:
-            try:
-                resp = self._visual_client.detect(frame, target_description)
-                self._broadcast_ai_activity("reacquire_detect")
-                if resp.target_visible and resp.confidence >= cfg.SEARCH_MIN_CONFIDENCE:
-                    logger.info("Target re-acquired immediately after L-maneuver")
-                    self._send_text_sync("Target re-acquired. Centering for inspection.")
-                    self._final_centering(target_description)
-                    return
-            except RateLimitError:
-                logger.warning("Rate limited during re-acquisition — proceeding with sweep")
-
-        # Expanding sweep: alternate CW/CCW with increasing angles
-        self._send_text_sync("Target not visible — sweeping to re-acquire.")
-        net_rotation = 0  # Track cumulative rotation to restore heading on failure
-
-        for i in range(max_sweeps):
-            self._check_abort()
-            # Alternate directions: even=CW, odd=CCW
-            # Increasing angle: (i // 2 + 1) * sweep_deg
-            angle = ((i // 2) + 1) * sweep_deg
-            direction = "clockwise" if i % 2 == 0 else "counter_clockwise"
-
-            self._controller.rotate(direction, angle)
-            self._log_command(f"Rotate {direction} {angle}° (re-acquire sweep {i + 1})")
-            if direction == "clockwise":
-                net_rotation += angle
-            else:
-                net_rotation -= angle
-            self._interruptible_sleep(cfg.APPROACH_ROTATE_DELAY)
-
-            frame = self._streamer.get_fresh_perception_frame_bytes(
-                timeout=3.0, min_new_frames=30,
-            )
-            if not frame:
-                continue
-
-            try:
-                resp = self._visual_client.detect(frame, target_description)
-                self._broadcast_ai_activity("reacquire_detect")
-            except RateLimitError:
-                continue
-
-            if resp.target_visible and resp.confidence >= cfg.SEARCH_MIN_CONFIDENCE:
-                logger.info(
-                    "Target re-acquired at sweep %d (net rotation %d°)",
-                    i + 1, net_rotation,
-                )
-                self._send_text_sync("Target re-acquired. Centering for inspection.")
-                self._final_centering(target_description)
-                return
-
-        # Exhausted all sweeps — proceed with best effort
-        logger.warning(
-            "Re-acquisition failed after %d sweeps (net rotation %d°) — "
-            "proceeding with inspection from current position",
-            max_sweeps, net_rotation,
-        )
-        self._send_text_sync(
-            "Could not re-acquire target after repositioning. "
-            "Proceeding with inspection from current position."
-        )
-
-    # ------------------------------------------------------------------
-    # Phase 3: Strafe + rotation inspection
-    # ------------------------------------------------------------------
-
     def _run_inspection_phase(
         self, target_description: str, aspects: str | None,
-        viewing_angle: str = "front",
     ) -> None:
         """Capture frames from 3 perspectives using lateral strafe + rotation."""
         cfg = self._config
@@ -1250,15 +1148,9 @@ class InspectionMission:
         captured_frames: list[bytes] = []
         captured_labels: list[str] = []
 
-        # Compute labels based on viewing angle
-        if viewing_angle != "front":
-            front_label = f"{viewing_angle} close-up"
-            right_label = f"{viewing_angle} right-angled view"
-            left_label = f"{viewing_angle} left-angled view"
-        else:
-            front_label = "front close-up"
-            right_label = "right-angled view"
-            left_label = "left-angled view"
+        front_label = "front close-up"
+        right_label = "right-angled view"
+        left_label = "left-angled view"
 
         # 1. Front close-up — capture at current position
         self._check_abort()

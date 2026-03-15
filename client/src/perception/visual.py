@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Literal
 
 from google import genai
 from google.genai import types
@@ -50,9 +51,65 @@ Return a JSON object with:
   MUST be 0.0 when target_visible is false.
 - box_2d: bounding box [ymin, xmin, ymax, xmax] values 0-1000.
   MUST be null when target_visible is false.
+- relative_size: estimate target width as a fraction of the full frame width.
+  Use this guide:
+    0.03-0.08 = tiny/far (3+ meters)
+    0.08-0.15 = small (1.5-3 meters)
+    0.15-0.25 = medium (0.8-1.5 meters)
+    0.25-0.40 = large/close (under 0.8 meters)
+    0.40+     = very close / filling the frame
+  MUST be 0.0 when target_visible is false.
 - path_clear: true if flight path toward object is clear of obstacles.
   Default true when target_visible is false.
 """
+
+
+_PLANNING_PROMPT = """\
+Split this inspection target into a searchable object and a specific feature.
+
+Target: "{target}"
+
+Rules:
+- searchable_object: The main object that can be found from any angle \
+(e.g. "green bicycle", "red car", "wooden bookshelf").
+- feature: The specific part or detail that might only be visible from \
+certain angles. Leave empty string "" if the target IS the whole object.
+
+Examples:
+- "the rear cassette of the green bicycle" → object="green bicycle", feature="rear cassette"
+- "the license plate on the red car" → object="red car", feature="license plate"
+- "the label on the back of the green box" → object="green box", feature="label on the back"
+- "the green box" → searchable_object="green box", feature=""
+- "inspect the drone battery" → searchable_object="drone battery", feature=""
+"""
+
+_REPOSITION_SYSTEM = """\
+You are guiding a drone to find a specific feature on an object. The drone is \
+close to the object and needs to reposition to see a hidden feature.
+
+Strategy tips:
+- To see the back of an object, orbit around it: move sideways then rotate to keep facing it.
+- Small moves (20-60cm) are better than large ones — the object is close.
+- After moving, rotate toward the object to keep it in frame.
+- If you've moved significantly and still can't see the feature, try the opposite side.
+- Say "done" when the feature is visible OR when you've exhausted reasonable options.
+
+Available actions:
+- move: direction (forward/back/left/right/up/down), amount (cm, 20-100)
+- rotate: direction (clockwise/counter_clockwise), amount (degrees, 15-90)
+- done: stop repositioning (feature found or giving up)
+"""
+
+_REPOSITION_TURN_PROMPT = """\
+The drone is near a "{object}" and looking for the "{feature}".
+
+{history_text}
+
+Look at the current camera image. Can you see the "{feature}"?
+- If YES: return action="done"
+- If NO: return the next move/rotate command to reposition.
+"""
+
 
 
 class AngleObservation(BaseModel):
@@ -115,12 +172,30 @@ the object identity (brand/product).
 """
 
 
+class InspectionPlan(BaseModel):
+    """Split a target description into a searchable object + specific feature."""
+
+    searchable_object: str
+    feature: str = ""
+
+
+class RepositionCommand(BaseModel):
+    """Single repositioning command from the Flash multi-turn chat."""
+
+    action: Literal["move", "rotate", "done"]
+    direction: str = ""
+    amount: int = 0
+    reason: str = ""
+
+
+
 class PerceptionResponse(BaseModel):
     """Structured response from visual perception."""
 
     target_visible: bool
     confidence: float = Field(ge=0.0, le=1.0)
     box_2d: list[int] | None = None  # [ymin, xmin, ymax, xmax], 0-1000
+    relative_size: float = Field(ge=0.0, le=1.0, default=0.0)
     path_clear: bool = True
 
 
@@ -222,13 +297,15 @@ class VisualPerceptionClient:
                 # Post-validation: enforce consistency when target not visible
                 if not result.target_visible:
                     result = PerceptionResponse(
-                        target_visible=False, confidence=0.0, box_2d=None, path_clear=True,
+                        target_visible=False, confidence=0.0, box_2d=None,
+                        relative_size=0.0, path_clear=True,
                     )
                 logger.debug(
-                    "Perception: visible=%s conf=%.2f box=%s path_clear=%s",
+                    "Perception: visible=%s conf=%.2f box=%s rel_size=%.3f path_clear=%s",
                     result.target_visible,
                     result.confidence,
                     result.box_2d,
+                    result.relative_size,
                     result.path_clear,
                 )
                 return result
@@ -363,3 +440,106 @@ class VisualPerceptionClient:
                 return fallback
 
         return fallback
+
+    # ------------------------------------------------------------------
+    # Inspection planning + repositioning
+    # ------------------------------------------------------------------
+
+    def plan_inspection(self, target_description: str) -> InspectionPlan:
+        """Split target into searchable object + specific feature.
+
+        On error, returns the full description as searchable_object with no feature
+        (safe fallback = today's behavior).
+        """
+        fallback = InspectionPlan(searchable_object=target_description, feature="")
+        prompt = _PLANNING_PROMPT.format(target=target_description)
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    temperature=self._temperature,
+                    response_mime_type="application/json",
+                    response_schema=InspectionPlan,
+                ),
+            )
+            if not response.text:
+                return fallback
+            result = InspectionPlan.model_validate_json(response.text)
+            logger.info(
+                "Inspection plan: object=%r feature=%r",
+                result.searchable_object, result.feature,
+            )
+            return result
+        except Exception:
+            logger.warning("plan_inspection() failed — using full description", exc_info=True)
+            return fallback
+
+    def reposition_step(
+        self,
+        frame_jpeg: bytes,
+        object_desc: str,
+        feature_desc: str,
+        conversation_history: list[types.Content],
+        move_descriptions: list[str] | None = None,
+    ) -> tuple[RepositionCommand, list[types.Content]]:
+        """One turn of the multi-turn repositioning chat.
+
+        Args:
+            frame_jpeg: Current drone camera frame.
+            object_desc: The main object description.
+            feature_desc: The specific feature to find.
+            conversation_history: Growing list of Content objects for multi-turn.
+            move_descriptions: Step-by-step history of actual moves executed.
+
+        Returns:
+            (command, updated_history) — the command to execute and updated history
+            for the next call. On error, returns action="done" (safe fallback).
+        """
+        fallback_cmd = RepositionCommand(action="done", reason="error fallback")
+        if move_descriptions:
+            history_text = "Moves so far:\n" + "\n".join(move_descriptions)
+        elif not conversation_history:
+            history_text = "No moves yet."
+        else:
+            history_text = f"Previous moves: {len(conversation_history) // 2} turn(s) so far."
+        prompt = _REPOSITION_TURN_PROMPT.format(
+            object=object_desc, feature=feature_desc, history_text=history_text,
+        )
+
+        # Build user turn with image + text
+        user_parts = [
+            types.Part.from_bytes(data=frame_jpeg, mime_type="image/jpeg"),
+            types.Part.from_text(text=prompt),
+        ]
+        user_content = types.Content(role="user", parts=user_parts)
+        updated_history = list(conversation_history) + [user_content]
+
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=updated_history,
+                config=types.GenerateContentConfig(
+                    temperature=self._temperature,
+                    response_mime_type="application/json",
+                    response_schema=RepositionCommand,
+                    system_instruction=_REPOSITION_SYSTEM,
+                ),
+            )
+            if not response.text:
+                return fallback_cmd, conversation_history
+            result = RepositionCommand.model_validate_json(response.text)
+            logger.info(
+                "Reposition step: action=%s dir=%s amount=%d reason=%s",
+                result.action, result.direction, result.amount, result.reason,
+            )
+            # Append model response to history
+            model_content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response.text)],
+            )
+            updated_history.append(model_content)
+            return result, updated_history
+        except Exception:
+            logger.warning("reposition_step() failed", exc_info=True)
+            return fallback_cmd, conversation_history

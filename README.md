@@ -1,4 +1,4 @@
-# Gemi-fly
+# Drone Copilot
 
 **Voice-controlled drone copilot powered by Gemini Live API**
 
@@ -6,7 +6,7 @@
 [![Gemini Live API](https://img.shields.io/badge/Gemini-Live%20API-4285F4.svg)](https://ai.google.dev)
 [![Cloud Run](https://img.shields.io/badge/Google%20Cloud-Run-4285F4.svg)](https://cloud.google.com/run)
 
-Gemi-fly lets you have a natural voice conversation with a DJI Tello drone while it streams live video to Google's Gemini AI. Say "take off," ask "what do you see?", or command "find the red bag" — the AI responds verbally in real time, controls the drone, and autonomously searches for objects using computer vision.
+Drone Copilot lets you have a natural voice conversation with a DJI Tello drone while it streams live video to Google's Gemini AI. Say "take off," ask "what do you see?", or command "find the red bag" — the AI responds verbally in real time, controls the drone, and autonomously searches for or inspects objects using computer vision.
 
 <!-- ![Dashboard Screenshot](docs/dashboard-screenshot.png) -->
 
@@ -14,11 +14,11 @@ Gemi-fly lets you have a natural voice conversation with a DJI Tello drone while
 
 ## Try it without a drone
 
-Most judges won't have a Tello drone — **no hardware required**. The demo mode replays pre-recorded missions through the same dashboard used for live flights.
+No hardware required. The demo mode replays pre-recorded missions through the same dashboard used for live flights.
 
 ```bash
 # Clone and install
-git clone https://github.com/<your-org>/drone-copilot.git
+git clone <YOUR_GITHUB_REPO_URL>
 cd drone-copilot
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r client/requirements.txt
@@ -39,7 +39,9 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 
 ---
 
-## Architecture
+## How it works
+
+Drone Copilot uses a **split architecture** to overcome a key hardware constraint: the DJI Tello drone creates its own WiFi network, which means the laptop controlling it loses internet access. The solution is a cloud backend.
 
 ```
 ┌─────────────────────────┐                ┌────────────── Google Cloud ──────────────┐
@@ -72,7 +74,11 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 └─────────────────────────┘
 ```
 
-**Split architecture**: The GCP Cloud Run backend hosts a persistent Gemini Live API session via **Vertex AI** for real-time bidirectional audio and video streaming. The local Python client connects to the DJI Tello drone, captures audio/video, streams them to the backend over WebSocket, and executes validated drone commands. A separate **Gemini Flash** (Vertex AI) client handles visual perception — bounding box detection during autonomous missions and multi-angle inspection reports. A web dashboard provides real-time monitoring for observers. All Gemini API calls route through Google Cloud (Vertex AI), with Cloud Run authenticating automatically via Application Default Credentials.
+- **Cloud Run backend** hosts a persistent Gemini Live API session (via Vertex AI) for real-time bidirectional audio and video streaming.
+- **Local Python client** connects to the DJI Tello, captures audio/video, streams them to the backend over WebSocket, and executes validated drone commands.
+- **Gemini Flash** (Vertex AI) handles visual perception — bounding box detection during autonomous missions and multi-angle inspection reports.
+- **Web dashboard** provides real-time monitoring for observers.
+- All Gemini API calls route through Google Cloud (Vertex AI), with Cloud Run authenticating automatically via Application Default Credentials.
 
 ---
 
@@ -81,7 +87,7 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 ### Prerequisites
 
 - Python 3.13+
-- Google Gemini API key
+- Google Cloud project with Vertex AI enabled (or a Gemini API key)
 - DJI Tello drone (optional — mock mode available)
 - macOS with microphone and speakers
 - Docker (for deployment)
@@ -90,7 +96,7 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 
 ```bash
 # Clone
-git clone https://github.com/<your-org>/drone-copilot.git
+git clone <YOUR_GITHUB_REPO_URL>
 cd drone-copilot
 
 # Virtual environment
@@ -119,7 +125,7 @@ open http://localhost:8081
 
 1. Power on the Tello and connect your Mac to `TELLO-XXXXXX` WiFi
 2. Set `USE_MOCK_DRONE=false` in `.env`
-3. Deploy the backend to Cloud Run (see below) since your Mac loses internet on Tello WiFi
+3. Deploy the backend to Cloud Run (see below) — required because Tello WiFi has no internet access
 4. Run the client as above
 
 ### Voice commands
@@ -139,7 +145,7 @@ open http://localhost:8081
 
 ## Google Cloud deployment
 
-The backend is deployed on **Google Cloud Run** with WebSocket support for persistent bidirectional streaming.
+The backend runs on **Google Cloud Run** with WebSocket support for persistent bidirectional streaming.
 
 ```bash
 # One-time GCP setup (enables Cloud Run, Vertex AI, etc.)
@@ -155,12 +161,10 @@ Or with Terraform:
 ```bash
 cd deploy/terraform
 terraform init
-terraform apply -var="project_id=<ID>" -var="image=gcr.io/<ID>/drone-copilot-backend" -var="gemini_api_key=<KEY>"
+terraform apply -var="project_id=<ID>" -var="image=gcr.io/<ID>/drone-copilot-backend"
 ```
 
-**Cloud Run configuration**: `--timeout=3600` (60 min WebSocket), `--session-affinity`, `--min-instances=1`, `/healthz` health check.
-
-<!-- ![Cloud Run Screenshot](docs/cloudrun-screenshot.png) -->
+**Cloud Run configuration**: `--timeout=3600` (60-min WebSocket sessions), `--session-affinity`, `--min-instances=1`, `/healthz` health check.
 
 ---
 
@@ -172,12 +176,12 @@ terraform apply -var="project_id=<ID>" -var="image=gcr.io/<ID>/drone-copilot-bac
 | **google-genai SDK** | Python SDK for Gemini Live API + Vertex AI |
 | **Tool Calls** | Structured AI-to-drone command interface (10 tools) |
 | **Multimodal Input** | Simultaneous audio + video streaming to Gemini |
-| **Context Window Compression** | Unlimited session duration (sliding window) |
+| **Context Window Compression** | Unlimited session duration via sliding window |
 | **Session Resumption** | Survive WebSocket reconnections seamlessly |
 | **Google Cloud Run** | Serverless backend with WebSocket support |
 | **FastAPI + WebSocket** | Backend relay and local dashboard server |
 | **DJI Tello + djitellopy** | Drone hardware control |
-| **sounddevice** | Local microphone capture and speaker playback |
+| **sounddevice + webrtcvad** | Mic capture, speaker playback, and voice activity detection |
 | **OpenCV** | Video frame capture, encoding, and processing |
 | **Pydantic** | Schema validation for all models and tool calls |
 

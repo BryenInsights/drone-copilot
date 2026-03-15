@@ -233,9 +233,10 @@ body {
   display: grid;
   grid-template-columns: 1fr 360px;
   gap: 20px;
-  padding: 16px 24px;
+  padding: 16px 24px 24px;
   max-width: 1440px;
   margin: 0 auto;
+  height: calc(100vh - 70px);
   opacity: 0; animation: fade-up 0.4s ease forwards;
   animation-delay: 2.6s;
 }
@@ -321,6 +322,7 @@ body {
 /* ── Info Panels ───────────────────────────────────── */
 .info-panels {
   display: flex; flex-direction: column; gap: 16px;
+  min-height: 0;
   overflow: hidden;
 }
 .panel {
