@@ -31,6 +31,8 @@ else
     gcloud iam service-accounts create "${SA_NAME}" \
         --display-name="Drone Copilot Deployer" \
         --project "${PROJECT_ID}"
+    echo "    Waiting 15 seconds for IAM propagation..."
+    sleep 15
 fi
 
 echo "==> Granting IAM roles..."
