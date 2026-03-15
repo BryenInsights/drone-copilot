@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY src/ src/
+COPY __init__.py backend/__init__.py
+COPY src/ backend/src/
 
 EXPOSE 8080
 
@@ -15,4 +16,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 RUN useradd --no-create-home appuser
 USER appuser
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "backend.src.main:app", "--host", "0.0.0.0", "--port", "8080"]
