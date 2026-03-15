@@ -50,11 +50,8 @@ htmlcov/
 *.tfvars
 .terraform.lock.hcl
 
-# Project reference docs (not for public repo)
-LESSONS_LEARNED.md
+# Project internals (not for public repo)
 CLAUDE.md
-DASHBOARD_DESIGN.md
-HACKATHON_RESOURCES.md
-HACKATHON_TRACKER.md
 .specify/
 specs/
+docs/
