@@ -18,7 +18,7 @@ No hardware required. The demo mode replays pre-recorded missions through the sa
 
 ```bash
 # Clone and install
-git clone <YOUR_GITHUB_REPO_URL>
+git clone https://github.com/BryenInsights/drone-copilot.git
 cd drone-copilot
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r client/requirements.txt
@@ -43,35 +43,35 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 
 Drone Copilot uses a **split architecture** to overcome a key hardware constraint: the DJI Tello drone creates its own WiFi network, which means the laptop controlling it loses internet access. The solution is a cloud backend.
 
-```
-┌─────────────────────────┐                ┌────────────── Google Cloud ──────────────┐
-│      LOCAL CLIENT        │   WebSocket    │                                          │
-│      (MacBook)           │◄─────────────►│  Cloud Run (Backend)                     │
-│                          │ audio+video →  │  ┌──────────────────────────────────┐    │
-│  ┌────────────────────┐  │ ← voice+tools │  │  FastAPI WebSocket Relay          │    │
-│  │ DJI Tello Drone    │  │               │  │  ┌────────────────────────────┐   │    │
-│  │ (WiFi control +    │  │               │  │  │  Gemini Live API Session   │   │    │
-│  │  720p video feed)  │  │               │  │  │  (Vertex AI)               │   │    │
-│  └────────────────────┘  │               │  │  │  • Bidirectional audio     │   │    │
-│  ┌────────────────────┐  │               │  │  │  • Video frame analysis    │   │    │
-│  │ Mic (16kHz) +      │  │               │  │  │  • Tool calls → drone     │   │    │
-│  │ Speaker (24kHz)    │  │               │  │  │  • Session resumption      │   │    │
-│  │ VAD filtering      │  │               │  │  └────────────────────────────┘   │    │
-│  └────────────────────┘  │               │  └──────────────────────────────────┘    │
-│  ┌────────────────────┐  │               │                                          │
-│  │ Visual Perception  │  │               │  Vertex AI (Gemini Flash API)            │
-│  │ (Gemini Flash)     │──────────────────┤  • Bounding box detection                │
-│  └────────────────────┘  │               │  • Inspection report generation           │
-│  ┌────────────────────┐  │               │                                          │
-│  │ Mission Controller │  │               │  Cloud Build (CI/CD)                     │
-│  │ Search + Inspect   │  │               │  Secret Manager                          │
-│  │ Approach + Orbit   │  │               │  Container Registry                      │
-│  └────────────────────┘  │               └──────────────────────────────────────────┘
-│  ┌────────────────────┐  │
-│  │ Web Dashboard      │  │    Browser
-│  │ (FastAPI :8081)    │──────► Live video, telemetry, transcript,
-│  └────────────────────┘  │     mission status, AI performance
-└─────────────────────────┘
+```mermaid
+graph TD
+    subgraph Local["Local Machine (MacBook)"]
+        Drone["DJI Tello Drone\n(WiFi control + 720p video)"]
+        Audio["Mic & Speaker\n(16kHz capture / 24kHz playback)\nVAD filtering"]
+        Perception["Visual Perception\n(Gemini Flash)"]
+        Mission["Mission Controller\nSearch · Inspect · Approach · Orbit"]
+        Dashboard["Web Dashboard\nlocalhost:8081"]
+    end
+
+    subgraph Cloud["Google Cloud"]
+        subgraph CloudRun["Cloud Run (Backend)"]
+            Relay["FastAPI WebSocket Relay"]
+            Session["Gemini Live API Session\n(Vertex AI)\nBidirectional audio · Video · Tool calls · Session resumption"]
+        end
+        Flash["Vertex AI — Gemini Flash\nBounding box detection\nInspection report generation"]
+    end
+
+    Browser["Browser\nLive video · Telemetry · Transcript · Mission status"]
+
+    Drone -- "video frames" --> Perception
+    Drone -- "video + control" --> Mission
+    Audio -- "audio stream" --> Relay
+    Relay -- "voice + tool calls" --> Audio
+    Perception -- "direct API call" --> Flash
+    Mission -- "drone commands" --> Drone
+    Relay <-- "WebSocket\naudio + video" --> Session
+    Local <-- "WebSocket" --> CloudRun
+    Dashboard --> Browser
 ```
 
 - **Cloud Run backend** hosts a persistent Gemini Live API session (via Vertex AI) for real-time bidirectional audio and video streaming.
@@ -96,7 +96,7 @@ Drone Copilot uses a **split architecture** to overcome a key hardware constrain
 
 ```bash
 # Clone
-git clone <YOUR_GITHUB_REPO_URL>
+git clone https://github.com/BryenInsights/drone-copilot.git
 cd drone-copilot
 
 # Virtual environment
