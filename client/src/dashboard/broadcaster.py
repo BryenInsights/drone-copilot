@@ -203,6 +203,14 @@ class DashboardBroadcaster:
             "timestamp": timestamp or time.time(),
         })
 
+    async def broadcast_skip_sync(self, skipped_seconds: float) -> None:
+        """Broadcast skip sync so frontend adjusts its timer."""
+        await self.broadcast_json({
+            "type": "skip_sync",
+            "data": {"skipped_seconds": skipped_seconds},
+            "timestamp": time.time(),
+        })
+
     async def broadcast_mic_state(self, muted: bool) -> None:
         """Broadcast mic muted/unmuted state."""
         await self.broadcast_json({

@@ -228,6 +228,33 @@ body {
 }
 .pill-connector.filled .fill { width: 100%; }
 
+/* Manual control pin */
+.timeline-divider {
+  display: inline-block;
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.pill-circle.manual-active {
+  background: var(--amber-bg);
+  border-color: var(--amber);
+  color: var(--amber);
+  animation: manual-pulse 2s ease-in-out infinite;
+}
+@keyframes manual-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(227, 116, 0, 0.2); }
+  50% { box-shadow: 0 0 0 6px rgba(227, 116, 0, 0); }
+}
+.pill-circle.manual-dim {
+  background: var(--bg-page);
+  border-color: var(--border);
+  color: var(--text-muted);
+  animation: none;
+}
+.pill-label.manual-active { color: var(--amber); }
+.pill-label.manual-dim { color: var(--text-muted); }
+
 /* ── Main Layout ───────────────────────────────────── */
 .main-content {
   display: grid;
@@ -317,6 +344,37 @@ body {
 }
 .ctrl-comm {
   margin-left: auto;
+}
+.ctrl-demo-select label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.ctrl-demo-select select {
+  padding: 7px 28px 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%235f6368' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.ctrl-demo-select select:hover {
+  border-color: var(--text-muted);
+  box-shadow: 0 1px 3px rgba(60,64,67,.15);
+}
+.ctrl-demo-select select:focus {
+  outline: none;
+  border-color: var(--violet);
+  box-shadow: 0 0 0 2px var(--violet-bg);
 }
 
 /* ── Info Panels ───────────────────────────────────── */

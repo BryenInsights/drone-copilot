@@ -382,6 +382,14 @@ class PhaseTimeline {
       const conn = document.getElementById('conn-' + i + '-' + (i + 1));
       if (conn) conn.classList.remove('filled');
     }
+    this.setManualActive(true);
+  }
+
+  setManualActive(active) {
+    const circle = document.getElementById('step-manual');
+    const label = circle?.parentElement?.querySelector('.pill-label');
+    if (circle) { circle.className = 'pill-circle ' + (active ? 'manual-active' : 'manual-dim'); }
+    if (label) { label.className = 'pill-label ' + (active ? 'manual-active' : 'manual-dim'); }
   }
 }
 
@@ -456,6 +464,12 @@ class FlightStats {
 
   onConnected() { this._indLive?.classList.add('active'); }
   onDisconnected() { this._indLive?.classList.remove('active'); }
+
+  onSkipSync(seconds) {
+    if (!this._missionStart) return;
+    // Shift mission start backwards so the elapsed timer jumps forward
+    this._missionStart -= seconds * 1000;
+  }
 
   onAIActivity(data) {
     this._indFlash?.classList.add('active-flash');
@@ -941,7 +955,7 @@ class Dashboard {
     this._btnMic = document.getElementById('btn-mic');
     this._micLabel = document.getElementById('mic-label');
 
-    this._micLabel.textContent = 'Mic Off';
+    if (this._micLabel) this._micLabel.textContent = 'Mic Off';
 
     this._bindButtons();
     this._checkDemoMode();
@@ -982,6 +996,7 @@ class Dashboard {
       ai_result:    this._onAIResult,
       report_data:  this._onReportData,
       mic_state:    this._onMicState,
+      skip_sync:    this._onSkipSync,
     };
   }
 
@@ -1012,6 +1027,7 @@ class Dashboard {
 
     this._currentState = state;
     this._missionActive = ['searching', 'approaching', 'repositioning', 'inspecting'].includes(missionStatus);
+    this._timeline.setManualActive(!this._missionActive);
     this._currentPhase = phase;
     if (target) this._currentTarget = target;
 
@@ -1123,7 +1139,16 @@ class Dashboard {
     });
     this._btnLand?.addEventListener('click', () => this._sendCommand('land'));
     this._btnEstop?.addEventListener('click', () => this._sendCommand('emergency_land'));
-    this._btnSkip?.addEventListener('click', () => this._sendCommand('skip_phase'));
+    this._btnSkip?.addEventListener('click', () => {
+      if (this._btnSkip.disabled) return;
+      this._sendCommand('skip_phase');
+      // Debounce: disable for 500ms to prevent rapid double-clicks
+      this._btnSkip.disabled = true;
+      setTimeout(() => {
+        this._btnSkip.disabled = false;
+        this._updateSkipEnabled();
+      }, 500);
+    });
     this._btnReport?.addEventListener('click', () => this._generateReport());
     this._btnMic?.addEventListener('click', () => this._toggleMic());
   }
@@ -1134,6 +1159,13 @@ class Dashboard {
 
   _onMicState(data) {
     this._updateMicUI(data.muted);
+  }
+
+  _onSkipSync(data) {
+    const seconds = data.skipped_seconds || 0;
+    if (seconds > 0) {
+      this._flightStats.onSkipSync(seconds);
+    }
   }
 
   _updateMicUI(muted) {
@@ -1181,6 +1213,9 @@ class Dashboard {
 
     // Target input disabled while executing or mission active
     if (this._targetInput) this._targetInput.disabled = executing || this._missionActive;
+
+    // Skip button enabled only when actively playing
+    this._updateSkipEnabled();
   }
 
   _updateSkipLabel(phase) {
@@ -1195,7 +1230,15 @@ class Dashboard {
     } else {
       this._btnSkip.textContent = 'Skip Phase';
     }
+    this._updateSkipEnabled();
     this._updateConditionalGroup();
+  }
+
+  _updateSkipEnabled() {
+    if (!this._btnSkip || !this._demoMode) return;
+    const s = this._currentState;
+    const active = ['EXECUTING', 'TAKEOFF'].includes(s);
+    this._btnSkip.disabled = !active;
   }
 
   // ── Demo Mode ────────────────────────────────────────────────
@@ -1214,35 +1257,50 @@ class Dashboard {
 
   _enableDemoUI(demos) {
     if (this._demoBadge) this._demoBadge.style.display = '';
-    if (this._btnSkip) this._btnSkip.style.display = '';
-
-    // Replace text input with select dropdown
-    if (this._targetInput && this._targetGroup) {
-      const select = document.createElement('select');
-      select.id = 'target-input';
-      select.className = this._targetInput.className;
-
-      if (demos.length === 0) {
-        const opt = document.createElement('option');
-        opt.textContent = 'No recordings available';
-        opt.disabled = true;
-        select.appendChild(opt);
-      } else {
-        for (const demo of demos) {
-          const opt = document.createElement('option');
-          opt.value = demo.id;
-          opt.textContent = demo.label || demo.target || demo.id;
-          if (demo.duration_sec) {
-            opt.textContent += ` (${Math.round(demo.duration_sec)}s)`;
-          }
-          select.appendChild(opt);
-        }
-      }
-
-      this._targetInput.replaceWith(select);
-      this._targetInput = select;
-      if (this._targetLabel) this._targetLabel.textContent = 'Select Demo';
+    if (this._btnSkip) {
+      this._btnSkip.style.display = '';
+      this._btnSkip.disabled = true;  // Disabled until playback starts
     }
+    this._updateConditionalGroup();
+
+    // Hide mic button in demo mode (not relevant for playback)
+    if (this._btnMic) this._btnMic.closest('.ctrl-group')?.style.setProperty('display', 'none');
+
+    // Create demo selector dropdown and inject into controls row
+    const controlsRow = document.querySelector('.controls-row');
+    if (!controlsRow) return;
+
+    const group = document.createElement('div');
+    group.className = 'ctrl-group ctrl-demo-select';
+
+    const label = document.createElement('label');
+    label.textContent = 'Select Demo';
+    label.setAttribute('for', 'target-input');
+    group.appendChild(label);
+
+    const select = document.createElement('select');
+    select.id = 'target-input';
+
+    if (demos.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = 'No recordings available';
+      opt.disabled = true;
+      select.appendChild(opt);
+    } else {
+      for (const demo of demos) {
+        const opt = document.createElement('option');
+        opt.value = demo.id;
+        opt.textContent = demo.label || demo.target || demo.id;
+        if (demo.duration_sec) {
+          opt.textContent += ` (${Math.round(demo.duration_sec)}s)`;
+        }
+        select.appendChild(opt);
+      }
+    }
+
+    group.appendChild(select);
+    controlsRow.insertBefore(group, controlsRow.firstChild);
+    this._targetInput = select;
   }
 
   // ── PDF Report Generation ────────────────────────────────────

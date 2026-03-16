@@ -24,6 +24,18 @@ PHASE_SKIP_PHASES = {"search"}
 # Phases that skip one step at a time
 STEP_SKIP_PHASES = {"approach", "inspect"}
 
+# Target playback FPS — thin recorded frames (~10 FPS) down to this rate
+PLAYBACK_FPS = 5
+
+# Message types that are "interesting" — triggers end of idle preamble scan
+_INTERESTING_TYPES = {"transcript", "log", "ai_activity", "ai_result"}
+
+# Message types broadcast during skip (everything except frame/telemetry)
+_SKIP_BROADCAST_TYPES = {
+    "status", "log", "transcript", "ai_activity", "ai_result",
+    "perception", "report_data",
+}
+
 
 class DemoPlayer:
     """Plays back a recorded demo session through the broadcaster.
@@ -57,6 +69,10 @@ class DemoPlayer:
         self._last_inspection_result: dict | None = None
         self._current_phase: str | None = None
 
+        # Frame thinning: track last broadcast time
+        self._last_frame_time: float = 0.0
+        self._frame_interval: float = 1.0 / PLAYBACK_FPS
+
     def _load(self) -> None:
         """Load the session.json file and parse messages."""
         session_path = self._demo_dir / "session.json"
@@ -77,6 +93,83 @@ class DemoPlayer:
             self._metadata.get("duration_sec", 0),
         )
 
+    def _find_first_interesting_index(self) -> int:
+        """Scan messages to find the first 'interesting' event.
+
+        Returns the index of 2s before that event, or 0 if nothing found.
+        """
+        for i, msg in enumerate(self._messages):
+            msg_type = msg.get("type", "")
+            if msg_type in _INTERESTING_TYPES:
+                # For log messages, skip IDLE-state logs
+                if msg_type == "log":
+                    data = msg.get("data", {})
+                    text = data.get("message", "") if isinstance(data, dict) else str(data)
+                    if "idle" in text.lower():
+                        continue
+                # Also treat non-IDLE status as interesting
+                target_t = msg.get("t", 0) - 2.0
+                if target_t <= 0:
+                    return 0
+                # Find the message index closest to target_t
+                for j in range(i - 1, -1, -1):
+                    if self._messages[j].get("t", 0) <= target_t:
+                        return j
+                return 0
+            if msg_type == "status":
+                data = msg.get("data", {})
+                state = (data.get("state") or "").upper()
+                if state not in ("IDLE", "READY", "CONNECTED", ""):
+                    target_t = msg.get("t", 0) - 2.0
+                    if target_t <= 0:
+                        return 0
+                    for j in range(i - 1, -1, -1):
+                        if self._messages[j].get("t", 0) <= target_t:
+                            return j
+                    return 0
+        return 0
+
+    async def _auto_skip_preamble(self) -> tuple[int, float]:
+        """Skip idle preamble, broadcasting only last telemetry + last frame.
+
+        Returns (start_index, playback_start) for the main loop.
+        """
+        first_idx = self._find_first_interesting_index()
+        if first_idx <= 1:
+            return 0, time.monotonic()
+
+        # Scan through preamble to find last telemetry and last frame
+        last_telemetry: dict | None = None
+        last_frame_msg: dict | None = None
+        for i in range(first_idx):
+            msg = self._messages[i]
+            msg_type = msg.get("type", "")
+            if msg_type == "telemetry":
+                last_telemetry = msg
+            elif msg_type == "frame":
+                last_frame_msg = msg
+            elif msg_type == "status":
+                data = msg.get("data", {})
+                phase = data.get("phase")
+                if phase:
+                    self._current_phase = phase
+
+        # Broadcast last telemetry and frame to initialize UI
+        if last_telemetry:
+            await self._broadcast_message(last_telemetry)
+        if last_frame_msg:
+            self._last_frame_b64 = await self._load_frame_data(last_frame_msg)
+            if self._last_frame_b64:
+                await self._broadcaster.broadcast_frame(self._last_frame_b64)
+
+        skipped_t = self._messages[first_idx].get("t", 0)
+        playback_start = time.monotonic() - skipped_t
+        logger.info(
+            "Auto-skipped %.1fs of idle preamble (%d messages)",
+            skipped_t, first_idx,
+        )
+        return first_idx, playback_start
+
     async def play(self) -> None:
         """Play the demo from start to finish."""
         self._load()
@@ -89,11 +182,12 @@ class DemoPlayer:
 
         self._playing = True
         self._stop_event.clear()
-        playback_start = time.monotonic()
+
+        # Auto-skip idle preamble
+        i, playback_start = await self._auto_skip_preamble()
 
         logger.info("Playback started: %s", self._metadata.get("target", ""))
 
-        i = 0
         while i < len(self._messages) and not self._stop_event.is_set():
             msg = self._messages[i]
             t = msg.get("t", 0)
@@ -123,10 +217,10 @@ class DemoPlayer:
             if self._stop_event.is_set():
                 break
 
-            # Handle skip
+            # Handle skip — fast-forward inline, broadcasting important messages
             if self._skip_event.is_set():
                 self._skip_event.clear()
-                i, playback_start = self._handle_skip(i, playback_start)
+                i, playback_start = await self._handle_skip(i, playback_start)
                 continue
 
             # Track phase from status messages
@@ -141,6 +235,13 @@ class DemoPlayer:
                 self._last_frame_b64 = await self._load_frame_data(msg)
                 if self._current_phase == "approach" and self._acquisition_frame is None:
                     self._acquisition_frame = self._last_frame_b64
+
+                # Frame thinning: only broadcast at PLAYBACK_FPS
+                now_real = time.monotonic()
+                if now_real - self._last_frame_time < self._frame_interval:
+                    i += 1
+                    continue
+                self._last_frame_time = now_real
 
             # Track AI results for report
             if msg_type == "ai_result":
@@ -203,46 +304,85 @@ class DemoPlayer:
             except asyncio.CancelledError:
                 pass
 
-    def _handle_skip(self, current_idx: int, playback_start: float) -> tuple[int, float]:
-        """Skip to the next phase or step. Returns (new_index, new_playback_start)."""
+    async def _handle_skip(
+        self, current_idx: int, playback_start: float
+    ) -> tuple[int, float]:
+        """Skip to the next phase or step, broadcasting important messages inline."""
         current_phase = self._current_phase
 
         if current_phase in PHASE_SKIP_PHASES:
-            # Phase-level skip: fast-forward all messages in current phase
-            # Still broadcast status/log/ai_result messages, skip frame/telemetry
-            return self._skip_phase(current_idx, current_phase, playback_start)
+            return await self._skip_phase(current_idx, current_phase, playback_start)
         elif current_phase in STEP_SKIP_PHASES:
-            # Step-level skip: skip to next step within phase
-            return self._skip_step(current_idx, playback_start)
+            return await self._skip_step(current_idx, playback_start)
         else:
-            # No skip possible
             return current_idx, playback_start
 
-    def _skip_phase(
+    async def _skip_phase(
         self, start_idx: int, phase: str | None, playback_start: float
     ) -> tuple[int, float]:
         """Skip to the end of the current phase, broadcasting important messages."""
+        last_frame_msg: dict | None = None
         i = start_idx
+
         while i < len(self._messages):
             msg = self._messages[i]
             msg_type = msg.get("type", "")
 
-            # Check if we've moved to a new phase
+            # Track phase from status messages
             if msg_type == "status":
                 data = msg.get("data", {})
                 new_phase = data.get("phase")
                 if new_phase and new_phase != phase:
-                    # Resync timer
+                    # Phase changed — broadcast last frame, send skip_sync, resync
+                    skipped_seconds = msg["t"] - self._messages[start_idx].get("t", 0)
+                    if last_frame_msg:
+                        frame_b64 = await self._load_frame_data(last_frame_msg)
+                        if frame_b64:
+                            self._last_frame_b64 = frame_b64
+                            await self._broadcaster.broadcast_frame(frame_b64)
                     new_start = time.monotonic() - msg["t"]
+                    await self._broadcaster.broadcast_skip_sync(skipped_seconds)
                     return i, new_start
+
+            # Track last frame during skip
+            if msg_type == "frame":
+                last_frame_msg = msg
+                self._last_frame_b64 = await self._load_frame_data(msg)
+                if self._current_phase == "approach" and self._acquisition_frame is None:
+                    self._acquisition_frame = self._last_frame_b64
+
+            # Track AI results for report
+            if msg_type == "ai_result":
+                data = msg.get("data", {})
+                if data.get("result_type") == "inspection":
+                    self._last_inspection_result = data
+
+            # Broadcast non-frame/telemetry messages during skip
+            if msg_type in _SKIP_BROADCAST_TYPES:
+                await self._broadcast_message(msg)
 
             i += 1
 
+        # Reached end without phase change
+        if last_frame_msg:
+            frame_b64 = await self._load_frame_data(last_frame_msg)
+            if frame_b64:
+                self._last_frame_b64 = frame_b64
+                await self._broadcaster.broadcast_frame(frame_b64)
+
+        skipped_seconds = (
+            self._messages[-1].get("t", 0) - self._messages[start_idx].get("t", 0)
+            if self._messages else 0
+        )
+        await self._broadcaster.broadcast_skip_sync(skipped_seconds)
         return i, playback_start
 
-    def _skip_step(self, start_idx: int, playback_start: float) -> tuple[int, float]:
+    async def _skip_step(
+        self, start_idx: int, playback_start: float
+    ) -> tuple[int, float]:
         """Skip to the next approach step or inspection angle."""
         current_step = None
+        last_frame_msg: dict | None = None
         i = start_idx
 
         # Find current step from recent status
@@ -252,22 +392,54 @@ class DemoPlayer:
                 if current_step is not None:
                     break
 
-        # Advance to next step
+        # Advance to next step, broadcasting important messages
         while i < len(self._messages):
             msg = self._messages[i]
-            if msg.get("type") == "status":
+            msg_type = msg.get("type", "")
+
+            if msg_type == "status":
                 data = msg.get("data", {})
                 new_step = data.get("step")
                 new_phase = data.get("phase")
 
                 if new_phase != self._current_phase:
-                    # Phase changed — resync and return
+                    # Phase changed — broadcast last frame, send skip_sync, resync
+                    skipped_seconds = msg["t"] - self._messages[start_idx].get("t", 0)
+                    if last_frame_msg:
+                        frame_b64 = await self._load_frame_data(last_frame_msg)
+                        if frame_b64:
+                            self._last_frame_b64 = frame_b64
+                            await self._broadcaster.broadcast_frame(frame_b64)
                     new_start = time.monotonic() - msg["t"]
+                    await self._broadcaster.broadcast_skip_sync(skipped_seconds)
                     return i, new_start
 
                 if new_step is not None and new_step != current_step:
+                    skipped_seconds = msg["t"] - self._messages[start_idx].get("t", 0)
+                    if last_frame_msg:
+                        frame_b64 = await self._load_frame_data(last_frame_msg)
+                        if frame_b64:
+                            self._last_frame_b64 = frame_b64
+                            await self._broadcaster.broadcast_frame(frame_b64)
                     new_start = time.monotonic() - msg["t"]
+                    await self._broadcaster.broadcast_skip_sync(skipped_seconds)
                     return i, new_start
+
+            # Track last frame during skip
+            if msg_type == "frame":
+                last_frame_msg = msg
+                self._last_frame_b64 = await self._load_frame_data(msg)
+
+            # Track AI results for report
+            if msg_type == "ai_result":
+                data = msg.get("data", {})
+                if data.get("result_type") == "inspection":
+                    self._last_inspection_result = data
+
+            # Broadcast non-frame/telemetry messages during skip
+            if msg_type in _SKIP_BROADCAST_TYPES:
+                await self._broadcast_message(msg)
+
             i += 1
 
         return i, playback_start
