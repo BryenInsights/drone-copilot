@@ -1,0 +1,2 @@
+client/demos/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+client/demos/**/*.json filter=lfs diff=lfs merge=lfs -text
