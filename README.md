@@ -47,23 +47,23 @@ Drone Copilot uses a **split architecture** to overcome a key hardware constrain
 graph LR
     subgraph Local["Local Client (MacBook)"]
         direction TB
-        Drone["DJI Tello Drone\nWiFi · 720p video"]
-        Audio["Mic & Speaker\n16kHz in · 24kHz out · VAD"]
-        Perception["Visual Perception\nGemini Flash"]
-        Mission["Mission Controller\nSearch · Inspect · Approach · Orbit"]
-        Dashboard["Web Dashboard\nlocalhost:8081"]
+        Drone["DJI Tello Drone<br/>WiFi · 720p video"]
+        Audio["Mic & Speaker<br/>16kHz in · 24kHz out · VAD"]
+        Perception["Visual Perception<br/>Gemini Flash"]
+        Mission["Mission Controller<br/>Search · Inspect · Approach · Orbit"]
+        Dashboard["Web Dashboard<br/>localhost:8081"]
     end
 
     subgraph GCP["Google Cloud"]
         direction TB
         subgraph CR["Cloud Run — Backend"]
             Relay["FastAPI WebSocket Relay"]
-            Session["Gemini Live API · Vertex AI\nBidirectional audio · Video analysis\nTool calls · Session resumption"]
+            Session["Gemini Live API · Vertex AI<br/>Bidirectional audio · Video analysis<br/>Tool calls · Session resumption"]
         end
-        Flash["Gemini Flash · Vertex AI\nBounding box detection\nInspection report generation"]
+        Flash["Gemini Flash · Vertex AI<br/>Bounding box detection<br/>Inspection report generation"]
     end
 
-    Browser["Browser\nLive video · Telemetry\nTranscript · Mission status"]
+    Browser["Browser<br/>Live video · Telemetry<br/>Transcript · Mission status"]
 
     Mission <-->|"commands / telemetry"| Drone
     Audio -->|"audio + video frames"| Relay
@@ -91,7 +91,7 @@ graph LR
 - macOS with microphone and speakers
 - Docker (for deployment)
 
-### Quick start
+### Quick start (mock drone, local backend)
 
 ```bash
 # Clone
@@ -106,26 +106,41 @@ source .venv/bin/activate
 pip install -r client/requirements.txt
 pip install -r backend/requirements.txt
 
-# Configure
-cp .env.example .env
-# Edit .env: set GEMINI_API_KEY, USE_MOCK_DRONE=true
+# Configure client
+cp client/.env.example client/.env
+# Edit client/.env: set GEMINI_API_KEY
 
 # Start backend (terminal 1)
-cd backend && uvicorn src.main:app --host 0.0.0.0 --port 8080
+uvicorn backend.src.main:app --host 0.0.0.0 --port 8080
 
 # Start client (terminal 2)
-cd client && python -m src.main
+python -m client.src.main
 
 # Open dashboard
 open http://localhost:8081
 ```
 
-### With a real drone
+By default `USE_MOCK_DRONE=true` (no drone needed) and `BACKEND_URL=ws://localhost:8080/ws` (local backend).
 
-1. Power on the Tello and connect your Mac to `TELLO-XXXXXX` WiFi
-2. Set `USE_MOCK_DRONE=false` in `.env`
-3. Deploy the backend to Cloud Run (see below) — required because Tello WiFi has no internet access
-4. Run the client as above
+### With a real drone (Cloud Run backend)
+
+The DJI Tello creates its own WiFi network. Connecting to it means your laptop **loses internet access**, so you need a **dual-network setup**: WiFi for the drone and an Ethernet cable (or USB-C adapter) for internet. The backend runs on Google Cloud Run, and your laptop reaches it through the wired connection.
+
+1. **Deploy the backend to Cloud Run** (see [Google Cloud deployment](#google-cloud-deployment) below)
+2. **Configure the client** — edit `client/.env`:
+   ```
+   BACKEND_URL=wss://your-cloud-run-service-url.a.run.app/ws
+   GEMINI_API_KEY=your-api-key-here
+   USE_MOCK_DRONE=false
+   ```
+3. **Connect an Ethernet cable** to your Mac (use a USB-C to Ethernet adapter if needed) — this provides internet access to reach Cloud Run
+4. **Power on the Tello** and connect your Mac's WiFi to `TELLO-XXXXXX`
+5. **Run the client**:
+   ```bash
+   source .venv/bin/activate
+   python -m client.src.main
+   ```
+6. **Open the dashboard** at http://localhost:8081 — toggle the mic and start talking to your drone
 
 ### Voice commands
 
@@ -155,6 +170,13 @@ cd deploy/scripts
 ./deploy.sh <YOUR_PROJECT_ID>
 ```
 
+You can run these commands from [Google Cloud Shell](https://shell.cloud.google.com) if you don't have `gcloud` installed locally:
+
+1. Open Cloud Shell in your browser
+2. Clone the repo: `git clone https://github.com/BryenInsights/drone-copilot.git`
+3. Run: `cd drone-copilot/deploy/scripts && ./deploy.sh <YOUR_PROJECT_ID>`
+4. The deploy script prints the service URL — use it as `BACKEND_URL` in `client/.env`
+
 Or with Terraform:
 
 ```bash
@@ -163,7 +185,16 @@ terraform init
 terraform apply -var="project_id=<ID>" -var="image=gcr.io/<ID>/drone-copilot-backend"
 ```
 
-**Cloud Run configuration**: `--timeout=3600` (60-min WebSocket sessions), `--session-affinity`, `--min-instances=1`, `/healthz` health check.
+**Cloud Run configuration**: `--timeout=3600` (60-min WebSocket sessions), `--session-affinity`, `--min-instances=0` (scales to zero when idle, ~20-30s cold start), `/health` health check.
+
+> **Tip**: Set `--min-instances=1` during active testing to avoid cold start delays. Set it back to `0` when done to save costs:
+> ```bash
+> # Keep warm during testing
+> gcloud run services update drone-copilot-backend --project <PROJECT_ID> --region us-central1 --min-instances=1
+>
+> # Scale to zero when done
+> gcloud run services update drone-copilot-backend --project <PROJECT_ID> --region us-central1 --min-instances=0
+> ```
 
 ---
 
