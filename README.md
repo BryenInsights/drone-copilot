@@ -64,7 +64,7 @@ graph LR
             Relay["FastAPI WebSocket Relay"]
             Session["Gemini Live API · Vertex AI<br/>Bidirectional audio · Video analysis<br/>Tool calls · Session resumption"]
         end
-        Flash["Gemini Flash · Vertex AI<br/>Bounding box detection<br/>Inspection report generation"]
+        Flash["Gemini Flash · Direct API<br/>Bounding box detection<br/>Inspection report generation"]
     end
 
     Browser["Browser<br/>Live video · Telemetry<br/>Transcript · Mission status"]
@@ -79,9 +79,9 @@ graph LR
 
 - **Cloud Run backend** hosts a persistent Gemini Live API session (via Vertex AI) for real-time bidirectional audio and video streaming.
 - **Local Python client** connects to the DJI Tello, captures audio/video, streams them to the backend over WebSocket, and executes validated drone commands.
-- **Gemini Flash** (Vertex AI) handles visual perception — bounding box detection during autonomous missions and multi-angle inspection reports.
+- **Gemini Flash** handles visual perception — bounding box detection during autonomous missions and multi-angle inspection reports.
 - **Web dashboard** provides real-time monitoring for observers.
-- All Gemini API calls route through Google Cloud (Vertex AI), with Cloud Run authenticating automatically via Application Default Credentials.
+- The Live API backend routes calls through Google Cloud (Vertex AI), with Cloud Run authenticating automatically via Application Default Credentials. The perception and report models call the Gemini API directly.
 
 ---
 
