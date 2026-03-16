@@ -16,10 +16,22 @@ Drone Copilot lets you have a natural voice conversation with a DJI Tello drone 
 
 No hardware required. The demo mode replays pre-recorded missions through the same dashboard used for live flights.
 
+Two demos are included:
+
+- **Open box** — two boxes sit on a table; Gemini correctly identifies the open one, autonomously flies to it, then follows manual voice commands.
+- **Lego statue inspection** — Gemini autonomously orbits a Lego statue to inspect it. Two notes reading "Gemini" and "Live Challenge" are placed nearby; Gemini spots some of them during the inspection.
+
+> **Note:** Demo files (images and telemetry) are stored in [Git LFS](https://git-lfs.com). Install it once with `git lfs install`, then run `git lfs pull` after cloning to download them.
+
 ```bash
+# Install Git LFS (once — skip if already installed)
+git lfs install
+
 # Clone and install
 git clone https://github.com/BryenInsights/drone-copilot.git
 cd drone-copilot
+git lfs pull  # download demo files
+
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r client/requirements.txt
 
