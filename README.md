@@ -33,9 +33,13 @@ Open **http://localhost:8081** in your browser, select a demo, and click **Start
 
 ## Watch the demo
 
-<!-- 🎥 [Demo Video (< 4 min)](https://youtube.com/watch?v=PLACEHOLDER) -->
+**Screen + dashboard view**
 
-*Demo video link will be added before submission.*
+[![Drone Copilot Demo](https://img.youtube.com/vi/_FCgmYjGCVs/maxresdefault.jpg)](https://youtu.be/_FCgmYjGCVs)
+
+**Outside view (iPhone)**
+
+[![Drone Copilot Demo — Outside View](https://img.youtube.com/vi/38d4ZavOyTw/maxresdefault.jpg)](https://youtu.be/38d4ZavOyTw)
 
 ---
 
@@ -141,19 +145,6 @@ The DJI Tello creates its own WiFi network. Connecting to it means your laptop *
    python -m client.src.main
    ```
 6. **Open the dashboard** at http://localhost:8081 — toggle the mic and start talking to your drone
-
-### Voice commands
-
-| Command | Action |
-|---------|--------|
-| "Take off" | Drone takes off and stabilizes |
-| "Land" | Safe landing |
-| "Move forward / back / left / right" | Directional movement |
-| "Look left / right" | Rotate drone |
-| "What do you see?" | AI describes camera view |
-| "Find the [object]" | Autonomous exploration mission |
-| "Check that [object]" | Multi-angle inspection mission |
-| "Stop" | Halt all movement |
 
 ---
 
